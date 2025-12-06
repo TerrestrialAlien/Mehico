@@ -1,6 +1,7 @@
 local ZoneControl = {}
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players") -- Added Players service
 local Teams = game:GetService("Teams")
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 
