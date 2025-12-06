@@ -1,0 +1,91 @@
+--[[
+	ZoneEffectsClient.lua (v1.4 - Simplified Text Only)
+	- This is a new LocalScript, place it in StarterPlayer > StarterPlayerScripts
+	- Listens for the game to start in "ZoneControl" mode.
+	- Finds the BillboardGui in the map.
+	- Listens for the "UpdateZoneEffect" event.
+	- Updates the BillboardGui text.
+	- NOTE: Fog particles are now handled entirely by the Server!
+]]
+
+-- --- SERVICES ---
+local ReplicatedStorage = game:WaitForChild("ReplicatedStorage")
+
+-- --- EVENTS ---
+local eventFolder = ReplicatedStorage:WaitForChild("GameEvents")
+local updateGameMode = eventFolder:WaitForChild("UpdateGameMode")
+local updateZoneEffect = eventFolder:WaitForChild("UpdateZoneEffect")
+local updateGameStateEvent = eventFolder:WaitForChild("UpdateGameState") 
+
+-- --- LOCAL CACHE ---
+local currentGamemode = ""
+local billboardLabel = nil
+
+-- ===================================================================
+-- EVENT LISTENERS
+-- ===================================================================
+
+-- Called when the gamemode is chosen
+local function onUpdateGameMode(gamemode)
+	currentGamemode = gamemode
+	billboardLabel = nil 
+
+	if gamemode == "ZoneControl" then
+		-- Find the billboard GUI in the new map
+		local map = workspace:WaitForChild("CurrentMap", 5)
+		if not map then return end
+
+		local billboardPart = map:FindFirstChild("ZoneBillboardScreen")
+		if not billboardPart then
+			warn("[ZoneEffectsClient] Map has no 'ZoneBillboardScreen' part!")
+			return
+		end
+
+		local billboardGui = billboardPart:FindFirstChildOfClass("SurfaceGui")
+		if not billboardGui then
+			warn("[ZoneEffectsClient] 'ZoneBillboardScreen' has no BillboardGui!")
+			return
+		end
+
+		billboardLabel = billboardGui:FindFirstChild("EffectLabel")
+		if not billboardLabel then
+			warn("[ZoneEffectsClient] BillboardGui has no 'EffectLabel'!")
+			return
+		end
+
+		-- Set initial text
+		billboardLabel.Text = "Inactive Zone"
+		print("[ZoneEffectsClient] Billboard GUI found and initialized.")
+	end
+end
+
+-- Called when the server picks a new effect
+local function onUpdateZoneEffect(effectName)
+	if not billboardLabel then return end 
+
+	if effectName then
+		billboardLabel.Text = "Active Zone: " .. effectName
+	else
+		billboardLabel.Text = "Inactive Zone"
+	end
+end
+
+-- Called when the round ends
+local function onUpdateGameState(state, status)
+	if state == "Intermission" or state == "RoundEnd" then
+		-- Reset UI
+		if billboardLabel then
+			billboardLabel.Text = "Inactive Zone"
+		end
+	end
+end
+
+-- ===================================================================
+-- INITIALIZATION
+-- ===================================================================
+
+updateGameMode.OnClientEvent:Connect(onUpdateGameMode)
+updateZoneEffect.OnClientEvent:Connect(onUpdateZoneEffect)
+updateGameStateEvent.OnClientEvent:Connect(onUpdateGameState)
+
+print("ZoneEffectsClient.lua (v1.4 - Simplified Text) loaded.")
