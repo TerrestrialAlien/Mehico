@@ -1,0 +1,555 @@
+--[[
+	SplatBombClient.lua (v1.5 - Mobile Image Overlay)
+	- Handles client input (R key / Mobile Floating Button).
+	- Manages "Aim Mode" (Visual Marker, Camera Rotation).
+	- Pitch-Based Aiming for Power.
+	- Mobile button follows finger anywhere on screen while aiming.
+	- Button snaps back to original position on release.
+	- FIX: Added 'ResetOnSpawn = false' to PC UI so it doesn't disappear after death.
+	- FIX: Moved PC Cancel Label to the right side to avoid UI overlap.
+	- NEW: Unified Cooldown UI (Recharging Bar) for both PC and Mobile.
+	- NEW: Added slot for Custom Mobile Button Image Overlay.
+]]
+
+-- --- SERVICES ---
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local TweenService = game:GetService("TweenService")
+local Workspace = workspace
+local GuiService = game:GetService("GuiService")
+local StarterGui = game:GetService("StarterGui")
+
+-- --- EVENTS ---
+local splatEvents = ReplicatedStorage:WaitForChild("SplatEvents")
+local requestThrowEvent = splatEvents:WaitForChild("RequestThrowBomb")
+local gameEvents = ReplicatedStorage:WaitForChild("GameEvents")
+local updateGameStateEvent = gameEvents:WaitForChild("UpdateGameState")
+
+-- --- PLAYER ---
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+local mouse = player:GetMouse()
+
+-- --- CONFIGURATION ---
+local THROW_KEY = Enum.KeyCode.R
+local MAX_THROW_DIST = 60 
+local MIN_THROW_DIST = 10  
+local THROW_ACTION_NAME = "ThrowSplatBomb"
+local IS_MOBILE = UserInputService.TouchEnabled
+local COOLDOWN_TIME = 12
+
+-- Aim Sensitivity Config
+local PITCH_LOOK_DOWN = -0.6 
+local PITCH_LOOK_UP = 0.2    
+local TOUCH_SENSITIVITY = Vector2.new(0.005, 0.003) 
+
+-- --- STATE ---
+local isAiming = false
+local aimMarker = nil 
+local currentPower = 0
+local currentAimCFrame = CFrame.new()
+local currentGameState = "Intermission"
+local lastThrowTime = 0
+local lastEquippedTool = nil
+
+-- Mobile State
+local mobileGui = nil
+local throwButton = nil
+local cancelButton = nil
+local touchObject = nil 
+local startTouchPos = Vector2.new(0,0)
+local originalButtonPos = UDim2.new(0.8, 0, 0.65, 0) 
+
+-- PC State
+local pcCancelLabel = nil
+
+-- Shared UI State
+local cooldownContainer = nil -- Background
+local cooldownBar = nil -- Foreground Bar
+
+-- ===================================================================
+-- STATE MANAGEMENT
+-- ===================================================================
+
+updateGameStateEvent.OnClientEvent:Connect(function(state)
+	currentGameState = state
+end)
+
+local function canThrow()
+	if currentGameState == "Intermission" then return false end
+	if tick() - lastThrowTime < COOLDOWN_TIME then return false end
+	local char = player.Character
+	if not char or not char:FindFirstChild("Humanoid") or char.Humanoid.Health <= 0 then return false end
+	return true
+end
+
+-- ===================================================================
+-- WEAPON HANDLING
+-- ===================================================================
+
+local function stashWeapon()
+	local char = player.Character
+	if not char then return end
+	local humanoid = char:FindFirstChild("Humanoid")
+	if not humanoid then return end
+
+	-- Save current tool
+	local tool = char:FindFirstChildOfClass("Tool")
+	if tool then
+		lastEquippedTool = tool
+		humanoid:UnequipTools()
+	else
+		lastEquippedTool = nil
+	end
+
+	-- Hide backpack
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+end
+
+local function restoreWeapon()
+	local char = player.Character
+	if not char then return end
+	local humanoid = char:FindFirstChild("Humanoid")
+
+	-- Show backpack
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
+
+	-- Re-equip tool if we had one
+	if lastEquippedTool and lastEquippedTool.Parent == player.Backpack and humanoid then
+		humanoid:EquipTool(lastEquippedTool)
+	end
+	lastEquippedTool = nil
+end
+
+-- ===================================================================
+-- COOLDOWN UI
+-- ===================================================================
+
+local function startCooldownVisuals()
+	lastThrowTime = tick()
+
+	if cooldownContainer and cooldownBar then
+		cooldownContainer.Visible = true
+		cooldownBar.Size = UDim2.new(1, 0, 1, 0) -- Start Full
+
+		-- Tween width to 0
+		local t = TweenService:Create(cooldownBar, TweenInfo.new(COOLDOWN_TIME, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 1, 0)})
+		t:Play()
+		t.Completed:Connect(function() cooldownContainer.Visible = false end)
+	end
+end
+
+-- ===================================================================
+-- VISUALS HELPER
+-- ===================================================================
+
+local function createAimMarker()
+	if aimMarker then aimMarker:Destroy() end
+
+	local part = Instance.new("Part")
+	part.Name = "AimMarker"
+	part.Size = Vector3.new(4, 0.2, 4)
+	part.Shape = Enum.PartType.Cylinder
+	part.Transparency = 0.5
+	part.Material = Enum.Material.Neon
+	part.BrickColor = BrickColor.new("Really red")
+	part.Anchored = true
+	part.CanCollide = false
+	part.CastShadow = false
+	part.Parent = Workspace
+	return part
+end
+
+-- ===================================================================
+-- CORE AIMING LOGIC
+-- ===================================================================
+
+local function updateAiming()
+	if not isAiming then return end
+
+	-- Enforce Mouse Lock (PC Only)
+	if not IS_MOBILE then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+	end
+
+	local char = player.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+	local root = char.HumanoidRootPart
+
+	-- 1. Calculate Power based on Camera Pitch
+	local lookVector = camera.CFrame.LookVector
+	local pitch = lookVector.Y 
+
+	local alpha = (pitch - PITCH_LOOK_DOWN) / (PITCH_LOOK_UP - PITCH_LOOK_DOWN)
+	currentPower = math.clamp(alpha, 0, 1)
+
+	local targetDistance = MIN_THROW_DIST + (currentPower * (MAX_THROW_DIST - MIN_THROW_DIST))
+
+	-- 2. Calculate Goal Position
+	local flatLookDir = Vector3.new(lookVector.X, 0, lookVector.Z).Unit
+
+	-- 3. Wall Occlusion Check
+	local rayOrigin = root.Position
+	local rayDir = flatLookDir * targetDistance
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {char, aimMarker}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local wallHit = Workspace:Raycast(rayOrigin, rayDir, rayParams)
+
+	local finalFlatPos
+	if wallHit then
+		finalFlatPos = wallHit.Position
+		local actualDist = (wallHit.Position - root.Position).Magnitude
+		currentPower = math.clamp((actualDist - MIN_THROW_DIST) / (MAX_THROW_DIST - MIN_THROW_DIST), 0, 1)
+	else
+		finalFlatPos = rayOrigin + rayDir
+	end
+
+	-- 4. Floor Snap
+	local floorRayOrigin = finalFlatPos + Vector3.new(0, 10, 0) 
+	local floorRayDir = Vector3.new(0, -50, 0) 
+	local floorHit = Workspace:Raycast(floorRayOrigin, floorRayDir, rayParams)
+
+	local markerPos
+	if floorHit then
+		markerPos = floorHit.Position
+	else
+		markerPos = Vector3.new(finalFlatPos.X, root.Position.Y - 2.5, finalFlatPos.Z)
+	end
+
+	-- 5. Update Visuals
+	if aimMarker then
+		aimMarker.CFrame = CFrame.new(markerPos) * CFrame.Angles(0,0, math.rad(90)) + Vector3.new(0, 0.2, 0)
+	end
+
+	-- 6. Rotate Character
+	local lookAtPos = root.Position + flatLookDir * 10
+	root.CFrame = CFrame.lookAt(root.Position, Vector3.new(lookAtPos.X, root.Position.Y, lookAtPos.Z))
+
+	currentAimCFrame = camera.CFrame
+end
+
+-- ===================================================================
+-- START / STOP / CANCEL LOGIC
+-- ===================================================================
+
+local function startThrow()
+	if isAiming or not canThrow() then return end
+	isAiming = true
+
+	stashWeapon()
+
+	-- Create visual
+	aimMarker = createAimMarker()
+
+	-- Prepare character
+	local char = player.Character
+	if char and char:FindFirstChild("Humanoid") then
+		char.Humanoid.AutoRotate = false 
+	end
+
+	-- Show PC Cancel UI
+	if not IS_MOBILE and pcCancelLabel then
+		pcCancelLabel.Visible = true
+	end
+
+	-- Bind loop
+	RunService:BindToRenderStep("SplatAim", Enum.RenderPriority.Camera.Value + 1, updateAiming)
+end
+
+local function cancelThrow()
+	if not isAiming then return end
+	isAiming = false
+
+	-- Reset everything
+	pcall(function() RunService:UnbindFromRenderStep("SplatAim") end)
+
+	if not IS_MOBILE then UserInputService.MouseBehavior = Enum.MouseBehavior.Default end
+	if aimMarker then aimMarker:Destroy() aimMarker = nil end
+
+	local char = player.Character
+	if char and char:FindFirstChild("Humanoid") then
+		char.Humanoid.AutoRotate = true
+	end
+
+	if not IS_MOBILE and pcCancelLabel then pcCancelLabel.Visible = false end
+	if IS_MOBILE and throwButton then throwButton:TweenPosition(originalButtonPos, "Out", "Back", 0.3) end
+
+	restoreWeapon() 
+	print("🚫 Bomb Throw Cancelled")
+end
+
+local function releaseThrow()
+	if not isAiming then return end
+	isAiming = false
+
+	pcall(function() RunService:UnbindFromRenderStep("SplatAim") end)
+
+	if not IS_MOBILE then UserInputService.MouseBehavior = Enum.MouseBehavior.Default end
+	if aimMarker then aimMarker:Destroy() aimMarker = nil end
+
+	local char = player.Character
+	if char and char:FindFirstChild("Humanoid") then
+		char.Humanoid.AutoRotate = true
+	end
+
+	if not IS_MOBILE and pcCancelLabel then pcCancelLabel.Visible = false end
+
+	-- FIRE!
+	requestThrowEvent:FireServer(currentAimCFrame, currentPower)
+	startCooldownVisuals()
+	restoreWeapon()
+end
+
+-- ===================================================================
+-- PC INPUT HANDLER
+-- ===================================================================
+
+local function pcInputHandler(actionName, inputState, inputObject)
+	if IS_MOBILE then return end 
+
+	if inputState == Enum.UserInputState.Begin then
+		startThrow()
+	elseif inputState == Enum.UserInputState.End then
+		releaseThrow()
+	end
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	-- Check for Left Click Cancel on PC
+	if not IS_MOBILE and isAiming and input.UserInputType == Enum.UserInputType.MouseButton1 then
+		cancelThrow()
+	end
+end)
+
+-- ===================================================================
+-- MOBILE UI & LOGIC
+-- ===================================================================
+
+local function createMobileUI()
+	if mobileGui then mobileGui:Destroy() end
+
+	mobileGui = Instance.new("ScreenGui")
+	mobileGui.Name = "SplatBombUI"
+	mobileGui.Parent = player:WaitForChild("PlayerGui")
+	mobileGui.ResetOnSpawn = false 
+
+	-- 1. THROW BUTTON (Draggable)
+	throwButton = Instance.new("ImageButton")
+	throwButton.Name = "ThrowButton"
+	throwButton.Size = UDim2.new(0, 80, 0, 80)
+	throwButton.Position = originalButtonPos
+	throwButton.AnchorPoint = Vector2.new(0.5, 0.5)
+	throwButton.BackgroundColor3 = Color3.new(0, 0, 0)
+	throwButton.BackgroundTransparency = 0.5
+	throwButton.Parent = mobileGui
+	Instance.new("UICorner", throwButton).CornerRadius = UDim.new(1, 0)
+
+	-- DEFAULT ICON
+	local icon = Instance.new("ImageLabel")
+	icon.Size = UDim2.new(0.6, 0, 0.6, 0)
+	icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.BackgroundTransparency = 1
+	icon.Image = "rbxassetid://120341749972545"
+	icon.Parent = throwButton
+
+	-- *** CUSTOM OVERLAY (Add your image here!) ***
+	local overlayIcon = Instance.new("ImageLabel")
+	overlayIcon.Name = "OverlayIcon"
+	overlayIcon.Size = UDim2.new(1, 0, 1, 0) -- Full Size
+	overlayIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
+	overlayIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+	overlayIcon.BackgroundTransparency = 1
+	overlayIcon.Image = "rbxassetid://13032780284" -- <--- PASTE YOUR IMAGE ID HERE!
+	overlayIcon.ZIndex = 2 -- On top of default
+	overlayIcon.Parent = throwButton
+
+	-- Cooldown Container (Mobile) - Same spot as PC Cancel
+	cooldownContainer = Instance.new("Frame")
+	cooldownContainer.Name = "CooldownContainer"
+	cooldownContainer.Size = UDim2.new(0, 200, 0, 20)
+	cooldownContainer.Position = UDim2.new(0.8, 0, 0.8, 0) -- Same as PC Cancel
+	cooldownContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+	cooldownContainer.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	cooldownContainer.BackgroundTransparency = 0.3
+	cooldownContainer.BorderSizePixel = 0
+	cooldownContainer.Visible = false
+	cooldownContainer.Parent = mobileGui
+	Instance.new("UICorner", cooldownContainer).CornerRadius = UDim.new(0, 4)
+
+	-- Text Label
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = "RECHARGING"
+	label.TextColor3 = Color3.new(1,1,1)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 14
+	label.ZIndex = 2 
+	label.Parent = cooldownContainer
+
+	-- Cooldown Bar
+	cooldownBar = Instance.new("Frame")
+	cooldownBar.Name = "Bar"
+	cooldownBar.Size = UDim2.new(1, 0, 1, 0) 
+	cooldownBar.BackgroundColor3 = Color3.new(1, 0.3, 0.3) 
+	cooldownBar.BorderSizePixel = 0
+	cooldownBar.ZIndex = 1
+	cooldownBar.Parent = cooldownContainer
+	Instance.new("UICorner", cooldownBar).CornerRadius = UDim.new(0, 4)
+
+	-- 2. CANCEL BUTTON
+	cancelButton = Instance.new("ImageButton")
+	cancelButton.Name = "CancelButton"
+	cancelButton.Size = UDim2.new(0, 60, 0, 60)
+	cancelButton.Position = originalButtonPos - UDim2.new(0.15, 0, 0.15, 0) 
+	cancelButton.AnchorPoint = Vector2.new(0.5, 0.5)
+	cancelButton.BackgroundColor3 = Color3.fromRGB(255, 85, 85) 
+	cancelButton.BackgroundTransparency = 0.8 
+	cancelButton.Visible = false 
+	cancelButton.Image = "rbxassetid://6940288377" 
+	cancelButton.Parent = mobileGui
+	Instance.new("UICorner", cancelButton).CornerRadius = UDim.new(1, 0)
+
+	-- --- TOUCH LOGIC ---
+
+	throwButton.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch and not touchObject then
+			if not canThrow() then return end
+			touchObject = input
+			startTouchPos = Vector2.new(input.Position.X, input.Position.Y)
+			cancelButton.Visible = true 
+			startThrow() 
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input == touchObject and isAiming then
+			local currentPos = Vector2.new(input.Position.X, input.Position.Y)
+
+			-- Move Button
+			throwButton.Position = UDim2.new(0, currentPos.X, 0, currentPos.Y)
+
+			-- Cancel Overlap Check
+			local cancelAbsPos = cancelButton.AbsolutePosition
+			local cancelSize = cancelButton.AbsoluteSize
+			local cancelCenter = cancelAbsPos + (cancelSize/2)
+
+			if (currentPos - cancelCenter).Magnitude < (cancelSize.X/2 + 20) then
+				cancelButton.BackgroundTransparency = 0.2 
+				cancelButton.Size = UDim2.new(0, 70, 0, 70) 
+			else
+				cancelButton.BackgroundTransparency = 0.8
+				cancelButton.Size = UDim2.new(0, 60, 0, 60)
+			end
+
+			-- Camera Rotation (Simple Method: Global Yaw / Local Pitch)
+			local diff = currentPos - startTouchPos
+			local rotX = -diff.X * TOUCH_SENSITIVITY.X
+			local rotY = -diff.Y * TOUCH_SENSITIVITY.Y
+
+			camera.CFrame = CFrame.Angles(0, rotX, 0) * camera.CFrame * CFrame.Angles(rotY, 0, 0)
+
+			startTouchPos = currentPos 
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input == touchObject then
+			touchObject = nil
+
+			-- Check Cancel
+			local currentPos = Vector2.new(input.Position.X, input.Position.Y)
+			local cancelAbsPos = cancelButton.AbsolutePosition
+			local cancelSize = cancelButton.AbsoluteSize
+			local cancelCenter = cancelAbsPos + (cancelSize/2)
+
+			if (currentPos - cancelCenter).Magnitude < (cancelSize.X/2 + 20) then
+				cancelThrow()
+			else
+				releaseThrow()
+			end
+
+			-- Reset UI
+			cancelButton.Visible = false
+			cancelButton.BackgroundTransparency = 0.8
+			cancelButton.Size = UDim2.new(0, 60, 0, 60)
+			throwButton:TweenPosition(originalButtonPos, "Out", "Back", 0.3)
+		end
+	end)
+end
+
+local function createPCUI()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SplatBombPCUI"
+	gui.Parent = player:WaitForChild("PlayerGui")
+	gui.ResetOnSpawn = false -- *** FIX: Prevents UI deletion on death ***
+
+	-- Cancel Label (Moved to the right side)
+	pcCancelLabel = Instance.new("TextLabel")
+	pcCancelLabel.Size = UDim2.new(0, 200, 0, 50)
+	pcCancelLabel.Position = UDim2.new(0.8, 0, 0.8, 0) -- Moved to 0.8 X
+	pcCancelLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+	pcCancelLabel.BackgroundTransparency = 1
+	pcCancelLabel.Text = "Left Click to Cancel"
+	pcCancelLabel.TextColor3 = Color3.new(1, 0, 0)
+	pcCancelLabel.Font = Enum.Font.GothamBold
+	pcCancelLabel.TextSize = 24
+	pcCancelLabel.TextStrokeTransparency = 0
+	pcCancelLabel.Visible = false
+	pcCancelLabel.Parent = gui
+
+	-- Cooldown Container (PC)
+	cooldownContainer = Instance.new("Frame")
+	cooldownContainer.Name = "CooldownContainer"
+	cooldownContainer.Size = UDim2.new(0, 200, 0, 20)
+	cooldownContainer.Position = UDim2.new(0.8, 0, 0.8, 0) -- Same pos as Cancel
+	cooldownContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+	cooldownContainer.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	cooldownContainer.BackgroundTransparency = 0.3
+	cooldownContainer.BorderSizePixel = 0
+	cooldownContainer.Visible = false
+	cooldownContainer.Parent = gui
+	Instance.new("UICorner", cooldownContainer).CornerRadius = UDim.new(0, 4)
+
+	-- Text Label
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = "RECHARGING"
+	label.TextColor3 = Color3.new(1,1,1)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 14
+	label.ZIndex = 2 -- On top of bar
+	label.Parent = cooldownContainer
+
+	-- Cooldown Bar
+	cooldownBar = Instance.new("Frame")
+	cooldownBar.Name = "Bar"
+	cooldownBar.Size = UDim2.new(1, 0, 1, 0) -- Full start
+	cooldownBar.BackgroundColor3 = Color3.new(1, 0.3, 0.3) -- Red-ish
+	cooldownBar.BorderSizePixel = 0
+	cooldownBar.ZIndex = 1
+	cooldownBar.Parent = cooldownContainer
+	Instance.new("UICorner", cooldownBar).CornerRadius = UDim.new(0, 4)
+end
+
+
+-- ===================================================================
+-- INITIALIZATION
+-- ===================================================================
+
+if IS_MOBILE then
+	createMobileUI()
+else
+	createPCUI()
+	ContextActionService:BindAction(THROW_ACTION_NAME, pcInputHandler, false, THROW_KEY)
+end
+
+print("✅ SplatBombClient (v1.5 - Mobile Image Overlay) Loaded")
