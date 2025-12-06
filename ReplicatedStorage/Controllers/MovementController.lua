@@ -658,10 +658,6 @@ function MovementController:SetupHoverboard()
     if hoverConnection then hoverConnection:Disconnect() end
     hoverConnection = RunService.Heartbeat:Connect(function(dt) self:UpdateHoverboard(dt) end)
 
-    local config = ABILITIES.Hoverboard
-    config.LastUse = os.clock()
-    self:StartCooldownUI(config)
-
     return true
 end
 

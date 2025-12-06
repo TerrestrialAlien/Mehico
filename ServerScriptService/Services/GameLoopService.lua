@@ -68,6 +68,7 @@ function GameLoopService:SetGameState(state, winner)
         if currentMap then currentMap:Destroy() currentMap = nil end
 
         workspace.Gravity = 196.2 -- Reset to Base Gravity
+        PlayerService:SetGameActive(false) -- Disable tools
 
         intermissionTimer = GameConfig.Game.IntermissionTime
         currentStatus = "Intermission - Waiting for players..."
@@ -81,6 +82,7 @@ function GameLoopService:SetGameState(state, winner)
         intermissionStartedEvent:Fire()
 
     elseif state == "RoundInProgress" then
+        PlayerService:SetGameActive(true) -- Enable tools
         currentMap = GamemodeService:SelectAndLoadMap()
         GamemodeService:StartRound(currentMap)
 

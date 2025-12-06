@@ -169,7 +169,7 @@ function InterfaceController:Start()
 
     local playerStunnedEvent = eventFolder:WaitForChild("PlayerStunned")
     playerStunnedEvent.OnClientEvent:Connect(function(p, d)
-        if p and p ~= player then self:ShowStunVisual(p.Character, d) end
+        if p then self:ShowStunVisual(p.Character, d) end
     end)
 
     local showUpgradeGuiEvent = eventFolder:WaitForChild("ShowUpgradeGui")

@@ -14,6 +14,7 @@ local updateUpgradeLevelsEvent = eventFolder:WaitForChild("UpdateUpgradeLevels")
 
 local playerData = {}
 local teamUpgrades = {}
+local gameActive = false
 
 function PlayerService:Init(services)
     -- Listeners
@@ -39,6 +40,10 @@ function PlayerService:Start()
     local Teams = game:GetService("Teams")
     teamUpgrades[Teams["Bright blue"]] = { Respawn = 0, Health = 0, Speed = 0 }
     teamUpgrades[Teams["Carnation pink"]] = { Respawn = 0, Health = 0, Speed = 0 }
+end
+
+function PlayerService:SetGameActive(active)
+    gameActive = active
 end
 
 function PlayerService:ResetAllPlayers()
@@ -82,17 +87,20 @@ function PlayerService:OnCharacterAdded(player, char)
         self:OnPlayerDied(player)
     end)
 
-    -- Give Loadout
+    -- Give Loadout only if game is active
     local starterGear = player:WaitForChild("StarterGear")
     starterGear:ClearAllChildren()
-    local toolFolder = game:GetService("ServerStorage"):WaitForChild("Assets"):WaitForChild("GameTools")
-    for _, tool in ipairs(toolFolder:GetChildren()) do
-        tool:Clone().Parent = starterGear
-    end
 
-    -- Here I'll just clone to Backpack if character exists.
-    for _, tool in ipairs(toolFolder:GetChildren()) do
-        tool:Clone().Parent = player.Backpack
+    if gameActive then
+        local toolFolder = game:GetService("ServerStorage"):WaitForChild("Assets"):WaitForChild("GameTools")
+        for _, tool in ipairs(toolFolder:GetChildren()) do
+            tool:Clone().Parent = starterGear
+        end
+
+        -- Here I'll just clone to Backpack if character exists.
+        for _, tool in ipairs(toolFolder:GetChildren()) do
+            tool:Clone().Parent = player.Backpack
+        end
     end
 end
 
