@@ -1,0 +1,822 @@
+--[[ 
+	ProgressGuiClient (v13.3 - Zone Countdown Tween + Penalty + Label BG color)
+	- Smooth progress bar tweening (TweenService)
+	- Smooth numeric tweening for percent (0.45s)
+	- Shows penalty inside percent text as "67% (+22)" when penalty > 0
+	- Percent label background frame changes to team color when that team controls both poles
+	- Back to Color3.fromRGB(27,42,53) when not controlling
+	- Maintains existing features (wobble, reveals, proximity highlights, etc.)
+]]
+
+
+-- --- SERVICES ---
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- *** THIS IS THE FIX ***
+local TweenService = game:GetService("TweenService")
+local Teams = game:GetService("Teams")
+local RunService = game:GetService("RunService")
+
+-- --- GUI OBJECTS ---
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local GameGui = playerGui:WaitForChild("GameGui")
+
+-- Progress Bar UI
+local HackProgressFrame = GameGui:WaitForChild("HackProgressFrame")
+local BlueBarBG = HackProgressFrame:WaitForChild("BlueBarBG")
+local BlueProgress = BlueBarBG:WaitForChild("BlueProgress")
+local BluePercentLabel = BlueBarBG:WaitForChild("BluePercentLabel")
+local BluePercentFrame = BluePercentLabel:WaitForChild("Frame") -- frame background to tint
+local PinkBarBG = HackProgressFrame:WaitForChild("PinkBarBG")
+local PinkProgress = PinkBarBG:WaitForChild("PinkProgress")
+local PinkPercentLabel = PinkBarBG:WaitForChild("PinkPercentLabel")
+local PinkPercentFrame = PinkPercentLabel:WaitForChild("Frame") -- frame background to tint
+
+-- Avatar Containers (children of their respective BarBGs)
+local BlueAvatarContainer = BlueBarBG:WaitForChild("BlueAvatarContainer")
+local PinkAvatarContainer = PinkBarBG:WaitForChild("PinkAvatarContainer")
+local PlayerAvatarTemplate = HackProgressFrame:WaitForChild("PlayerAvatarTemplate")
+
+-- Player Info & Status UI
+local PlayerInfoFrame = GameGui:WaitForChild("PlayerInfoFrame")
+local StatusLabel = PlayerInfoFrame:WaitForChild("StatusLabel")
+local TimerLabel = PlayerInfoFrame:WaitForChild("TimerLabel")
+local PointsLabel = PlayerInfoFrame:WaitForChild("PointsLabel")
+local MapChangeSound = PlayerInfoFrame:WaitForChild("MapChangeSound")
+local MapRumbleSound = PlayerInfoFrame:WaitForChild("MapRumbleSound")
+local HackAlertSound = PlayerInfoFrame:WaitForChild("HackAlertSound")
+local HackStopSound = PlayerInfoFrame:WaitForChild("HackStopSound")
+local ZoneAlertOnePoleSound = PlayerInfoFrame:WaitForChild("ZoneAlertOnePoleSound")
+local ZoneAlertBothPolesSound = PlayerInfoFrame:WaitForChild("ZoneAlertBothPolesSound")
+
+-- Zone Control Icons
+local PoleIcon1 = PlayerInfoFrame:WaitForChild("PoleIcon1")
+local PoleIcon2 = PlayerInfoFrame:WaitForChild("PoleIcon2")
+
+-- --- REMOTE EVENTS ---
+local eventFolder = ReplicatedStorage:WaitForChild("GameEvents")
+local updateProgressEvent = eventFolder:WaitForChild("UpdateHackProgress")
+local updateTimerEvent = eventFolder:WaitForChild("UpdateGameTimer")
+local updateGameStateEvent = eventFolder:WaitForChild("UpdateGameState")
+local updateTeamRosterEvent = eventFolder:WaitForChild("UpdateTeamRoster")
+local playerSyncEvent = eventFolder:WaitForChild("PlayerSync")
+local updatePointsEvent = eventFolder:WaitForChild("UpdatePoints")
+local updateHackAlertEvent = eventFolder:WaitForChild("UpdateHackAlert")
+local triggerMapAlertEvent = eventFolder:WaitForChild("TriggerMapAlert")
+local revealTerminalEvent = eventFolder:WaitForChild("RevealTerminal")
+local proximityHighlightGained = eventFolder:WaitForChild("ProximityHighlightGained")
+local proximityHighlightLost = eventFolder:WaitForChild("ProximityHighlightLost")
+
+-- Zone Control Events
+local updateZoneControlUI = eventFolder:WaitForChild("UpdateZoneControlUI")
+local updateGameMode = eventFolder:WaitForChild("UpdateGameMode")
+local updateZoneCountdown = eventFolder:WaitForChild("UpdateZoneCountdown")
+local zoneAlertEvent = eventFolder:WaitForChild("ZoneAlert")
+
+-- --- LOCAL CACHE & STATE ---
+local playerAvatarCache = {} -- [userId] = ImageLabel
+local proximityHighlights = {} -- [terminalPart] = Highlight
+local blueTeam = Teams["Bright blue"]
+local pinkTeam = Teams["Carnation pink"]
+
+-- Animation State
+local currentGamemode = "" -- "TerminalFrenzy" or "ZoneControl"
+local currentGameState = ""
+local defaultStatusText = "Waiting for players..."
+local activeAlert = false
+local currentAlertId = 0
+local HACK_WOBBLE_TIME = 0.8 -- Was 1.5
+local HACK_TWEEN_INFO_RESET = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local blueHackThread = nil
+local pinkHackThread = nil
+
+-- Tween durations (user chose Option 2)
+local NUMBER_TWEEN_DURATION = 0.45
+local BAR_TWEEN_DURATION = 0.45
+
+-- Cached displayed numeric values (so we can tween from current -> new)
+local displayedBlueFraction = 0 -- 0..1
+local displayedPinkFraction = 0 -- 0..1
+local displayedBluePercentValue = 0 -- 0..100
+local displayedPinkPercentValue = 0 -- 0..100
+
+-- Active tweens (so we can cancel/replace)
+local activeBlueBarTween = nil
+local activePinkBarTween = nil
+
+-- Default percent label frame color (when not controlling)
+local DEFAULT_PERCENT_FRAME_COLOR = Color3.fromRGB(27, 42, 53)
+
+-- Event Connections
+local tfProgressConnection = nil
+local zcCountdownConnection = nil
+
+-- ===================================================================
+-- Utility / Tweening Helpers
+-- ===================================================================
+
+local function safeCancelTween(tween)
+	if tween then
+		-- There's no Cancel on Tween objects; we can stop by: tween:Cancel() (Roblox supports Cancel)
+		pcall(function() tween:Cancel() end)
+	end
+end
+
+-- Tween the progress bar size smoothly
+local function tweenProgressBar(targetGuiObject, targetFraction, duration)
+	-- targetGuiObject is the "Progress" frame whose Size should be tweened
+	-- targetFraction is 0..1
+	local targetUDim = UDim2.new(math.clamp(targetFraction, 0, 1), 0, 1, 0)
+	-- Cancel existing tween if present
+	-- For safety, create a new tween
+	local ti = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(targetGuiObject, ti, {Size = targetUDim})
+	tween:Play()
+	return tween
+end
+
+-- Numeric tween helper (interpolates numbers and calls updateFunc(value) each step)
+local function tweenNumber(fromValue, toValue, duration, updateFunc)
+	-- Cancel by returning a token; for simplicity we'll spawn a task that updates.
+	-- We'll use a simple lerp with task.wait() frame stepping.
+	local start = tick()
+	local finish = start + duration
+	local cancelled = false
+	local co = task.spawn(function()
+		while true do
+			local now = tick()
+			local alpha = 1
+			if finish > start then
+				alpha = math.clamp((now - start) / duration, 0, 1)
+			end
+			local value = fromValue + (toValue - fromValue) * alpha
+			updateFunc(value)
+			if alpha >= 1 then break end
+			task.wait() -- yield one frame
+		end
+	end)
+	-- We don't return a cancellable object here; future calls will just overwrite the visual values.
+	return co
+end
+
+-- Formats percent string with optional penalty
+local function formatPercentText(percentVal, penalty)
+	-- percentVal: number 0..100
+	-- penalty: integer >=0
+	local base = string.format("%.0f%%", percentVal)
+	if penalty and penalty > 0 then
+		return base .. " (+" .. tostring(penalty) .. ")"
+	end
+	return base
+end
+
+-- Helper to set percent label BG frame color (with quick tween for smoothness)
+local function setPercentFrameColor(frame, color)
+	-- Tween BackgroundColor3 for a bit of smoothness
+	local ti = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(frame, ti, { BackgroundColor3 = color }):Play()
+end
+
+-- ===================================================================
+-- GUI UPDATE FUNCTIONS
+-- ===================================================================
+
+-- Called when a hack alert is fired (Terminal Frenzy)
+local function onHackAlert(hackedTeamColor, hackerTeamColor, isBeingHacked)
+	-- Increment the alert id so only the latest scheduled reset runs
+	currentAlertId = currentAlertId + 1
+	local myId = currentAlertId
+	activeAlert = true
+
+	-- Find the team objects by comparing their colors
+	local hackedTeam = (hackedTeamColor == blueTeam.TeamColor) and blueTeam or pinkTeam
+	local hackerTeam = (hackerTeamColor == blueTeam.TeamColor) and blueTeam or pinkTeam
+
+	if isBeingHacked then
+		-- HACKING STARTED
+		print("HACKING STARTED alert received")
+		StatusLabel.Text = hackedTeam.Name .. "'s terminal is being hacked!"
+		StatusLabel.TextColor3 = hackerTeam.TeamColor.Color
+
+		-- Play sound (if not already playing)
+		if not HackAlertSound.Playing then
+			HackAlertSound:Play()
+		end
+
+		-- Start wobble animation
+		if hackerTeam == blueTeam and not blueHackThread then
+			blueHackThread = task.spawn(function()
+				while true do
+					BluePercentLabel.Rotation = 10
+					task.wait(HACK_WOBBLE_TIME)
+					BluePercentLabel.Rotation = -10
+					task.wait(HACK_WOBBLE_TIME)
+				end
+			end)
+		elseif hackerTeam == pinkTeam and not pinkHackThread then
+			pinkHackThread = task.spawn(function()
+				while true do
+					PinkPercentLabel.Rotation = 10
+					task.wait(HACK_WOBBLE_TIME)
+					PinkPercentLabel.Rotation = -10
+					task.wait(HACK_WOBBLE_TIME)
+				end
+			end)
+		end
+
+	else
+		-- HACKING STOPPED
+		print("HACKING STOPPED alert received")
+		StatusLabel.Text = hackedTeam.Name .. "'s terminal has stopped being hacked!"
+		StatusLabel.TextColor3 = hackedTeam.TeamColor.Color
+
+		-- Play sound (if not already playing)
+		if not HackStopSound.Playing then
+			HackStopSound:Play()
+		end
+
+		-- Stop wobble animation
+		if hackedTeam == pinkTeam and blueHackThread then
+			task.cancel(blueHackThread)
+			blueHackThread = nil
+			TweenService:Create(BluePercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = -2}):Play()
+		elseif hackedTeam == blueTeam and pinkHackThread then
+			task.cancel(pinkHackThread)
+			pinkHackThread = nil
+			TweenService:Create(PinkPercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = 2}):Play()
+		end
+	end
+
+	-- Schedule a reset 3 seconds later. Only perform reset if this is still the latest alert.
+	task.delay(3, function()
+		if myId == currentAlertId then
+			StatusLabel.Text = defaultStatusText
+			StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+			activeAlert = false
+		end
+	end)
+end
+
+-- NEW: Called when a zone alert is fired (Zone Control)
+local function onZoneAlert(alertType, team)
+	currentAlertId = currentAlertId + 1
+	local myId = currentAlertId
+	activeAlert = true
+
+	if alertType == "OnePole" then
+		StatusLabel.Text = team.Name .. " captured a pole!"
+		if not ZoneAlertOnePoleSound.Playing then
+			ZoneAlertOnePoleSound:Play()
+		end
+	elseif alertType == "BothPoles" then
+		StatusLabel.Text = team.Name .. " captured both poles and controls the zone!"
+		if not ZoneAlertBothPolesSound.Playing then
+			ZoneAlertBothPolesSound:Play()
+		end
+	end
+
+	StatusLabel.TextColor3 = team.TeamColor.Color
+
+	-- Reset after 3 seconds
+	task.delay(3, function()
+		if myId == currentAlertId then
+			StatusLabel.Text = defaultStatusText
+			StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+			activeAlert = false
+		end
+	end)
+end
+
+-- Called when a player joins, leaves, or dies
+local function onUpdateTeamRoster(rosters, targetUserId, isAlive)
+
+	-- This is a "status update" (death/respawn) not a full roster change
+	if targetUserId then
+		local avatar = playerAvatarCache[targetUserId]
+		if avatar then
+			-- Gray out if dead, restore color if alive
+			avatar.ImageColor3 = isAlive and Color3.new(1, 1, 1) or Color3.new(0.3, 0.3, 0.3)
+		end
+		return -- Stop here
+	end
+
+	-- This is a FULL roster update
+	-- Clear all old avatars
+	BlueAvatarContainer:ClearAllChildren()
+	PinkAvatarContainer:ClearAllChildren()
+	playerAvatarCache = {}
+
+	if not rosters then
+		print("Roster cleared (Intermission)")
+		return
+	end
+
+	-- Create avatars for Blue Team
+	if rosters[blueTeam.Name] then
+		for _, playerObj in ipairs(rosters[blueTeam.Name]) do
+			local avatar = PlayerAvatarTemplate:Clone()
+			avatar.Name = playerObj.Name
+			avatar.Visible = true
+			avatar.Parent = BlueAvatarContainer
+
+			-- Store in cache
+			playerAvatarCache[playerObj.UserId] = avatar
+
+			-- Fetch and apply thumbnail (in a protected call)
+			local success, content, isReady = pcall(Players.GetUserThumbnailAsync, Players, playerObj.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+			if success and isReady then
+				avatar.Image = content
+			else
+				warn("Could not load thumbnail for " .. playerObj.Name)
+			end
+		end
+	end
+
+	-- Create avatars for Pink Team
+	if rosters[pinkTeam.Name] then
+		for _, playerObj in ipairs(rosters[pinkTeam.Name]) do
+			local avatar = PlayerAvatarTemplate:Clone()
+			avatar.Name = playerObj.Name
+			avatar.Visible = true
+			avatar.Parent = PinkAvatarContainer
+
+			-- Store in cache
+			playerAvatarCache[playerObj.UserId] = avatar
+
+			-- Fetch and apply thumbnail (in a protected call)
+			local success, content, isReady = pcall(Players.GetUserThumbnailAsync, Players, playerObj.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+			if success and isReady then
+				avatar.Image = content
+			else
+				warn("Could not load thumbnail for " .. playerObj.Name)
+			end
+		end
+	end
+end
+
+-- Called when the dynamic map event is fired
+local function onMapAlert()
+	print("Map alert received!")
+	activeAlert = true
+	currentAlertId = currentAlertId + 1
+	local myId = currentAlertId
+
+	StatusLabel.Text = "Last push, the map is changing!"
+	StatusLabel.TextColor3 = Color3.fromRGB(255, 170, 0) -- Orange
+
+	-- Play sound (if not already playing)
+	if not MapChangeSound.Playing then
+		MapChangeSound:Play()
+	end
+
+	-- Wait for the alarm to finish
+	task.wait(MapChangeSound.TimeLength)
+
+	-- Play rumble
+	if not MapRumbleSound.Playing then
+		MapRumbleSound:Play()
+	end
+
+	-- Reset text after 7 seconds (4s warning + 3s text)
+	task.delay(7, function()
+		if myId == currentAlertId then
+			StatusLabel.Text = defaultStatusText
+			StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+			activeAlert = false
+		end
+	end)
+end
+
+-- Called when a terminal should be revealed
+local function onRevealTerminal(terminalPart, hackedTeamName)
+	if not terminalPart or not terminalPart.Parent then return end
+
+	print("Revealing terminal: " .. terminalPart.Name)
+
+	local highlight = Instance.new("Highlight")
+
+	-- Check if *my* team is the one being hacked
+	if player.Team and player.Team.Name == hackedTeamName then
+		-- I am a DEFENDER
+		print("I am on the defending team, showing RED highlight.")
+		highlight.FillColor = Color3.fromRGB(255, 0, 0)
+		highlight.OutlineColor = Color3.fromRGB(255, 0, 0)
+	else
+		-- I am an ATTACKER
+		print("I am on the attacking team, showing WHITE highlight.")
+		highlight.FillColor = Color3.fromRGB(255, 255, 255)
+		highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+	end
+
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- See through walls
+	highlight.FillTransparency = 0.8
+	highlight.OutlineTransparency = 0.2
+
+	-- FIX: Parent to GUI and Adorn to the part!
+	highlight.Adornee = terminalPart
+	highlight.Parent = GameGui
+
+	-- Destroy after 5 seconds
+	task.delay(5, function()
+		if highlight and highlight.Parent then
+			highlight:Destroy()
+		end
+	end)
+end
+
+-- Called when we get close to an enemy terminal
+local function onProximityGained(terminalPart)
+	if not terminalPart or not terminalPart.Parent then return end
+	if proximityHighlights[terminalPart] then return end -- Already showing
+
+	print("Proximity gained for: " .. terminalPart.Name)
+
+	local highlight = Instance.new("Highlight")
+	highlight.FillColor = Color3.fromRGB(255, 170, 0) -- Orange
+	highlight.OutlineColor = Color3.fromRGB(255, 170, 0)
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 0.8
+	highlight.OutlineTransparency = 0.2
+
+	-- FIX: Parent to GUI and Adorn to the part!
+	highlight.Adornee = terminalPart
+	highlight.Parent = GameGui
+
+	proximityHighlights[terminalPart] = highlight
+end
+
+-- Called when we move away from an enemy terminal
+local function onProximityLost(terminalPart)
+	if not terminalPart or not proximityHighlights[terminalPart] then return end
+
+	print("Proximity lost for: " .. terminalPart.Name)
+	proximityHighlights[terminalPart]:Destroy()
+	proximityHighlights[terminalPart] = nil
+end
+
+-- Called when player points are updated
+local function onUpdatePoints(points)
+	if points then
+		PointsLabel.Text = "Points: " .. points
+	end
+end
+
+-- Called every time the timer changes
+local function onUpdateTimer(seconds)
+	local minutes = math.floor(seconds / 60)
+	local remainingSeconds = seconds % 60
+	TimerLabel.Text = string.format("%d:%02d", minutes, remainingSeconds)
+end
+
+-- Called when the game state changes (e.g., "Intermission")
+local function onUpdateGameState(state, status)
+	-- Store the state locally
+	currentGameState = state
+
+	-- Set the default text for the *next* round
+	if state == "Intermission" then
+		defaultStatusText = "Waiting for players..."
+	elseif currentGamemode == "ZoneControl" then
+		defaultStatusText = "Capture the Towers!"
+	else
+		defaultStatusText = "Hack the enemy terminal!"
+	end
+
+	-- *** THIS IS THE FIX ***
+	-- If this is a special state (like RoundEnd), display the server's message directly
+	if state == "RoundEnd" then
+		activeAlert = false -- Stop any alerts
+		StatusLabel.Text = status -- Show "Round Over! [Team] wins!"
+		StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+
+	elseif not activeAlert then
+		-- If it's not RoundEnd and there's no alert, show the default text
+		StatusLabel.Text = defaultStatusText
+		StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+	end
+
+	-- Reset tweens and highlights on intermission
+	if state == "Intermission" then
+		if blueHackThread then
+			task.cancel(blueHackThread)
+			blueHackThread = nil
+			TweenService:Create(BluePercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = -2}):Play()
+		end
+		if pinkHackThread then
+			task.cancel(pinkHackThread)
+			pinkHackThread = nil
+			TweenService:Create(PinkPercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = 2}):Play()
+		end
+
+		-- Clear all highlights
+		for _, highlight in pairs(proximityHighlights) do
+			highlight:Destroy()
+		end
+		proximityHighlights = {}
+
+		for _, child in ipairs(GameGui:GetChildren()) do
+			if child:IsA("Highlight") then
+				child:Destroy()
+			end
+		end
+
+		-- Reset percent frames to default color
+		setPercentFrameColor(BluePercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+		setPercentFrameColor(PinkPercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+	end
+end
+
+-- Listener for hack progress changes (TerminalFrenzy) - tween the bars too
+local function onUpdateProgress(blueProg, pinkProg, maxProg)
+	-- Server now sends (Blue_Score, Pink_Score, Max)
+	-- We receive as (blueProg, pinkProg, maxProg)
+
+	local blueFraction = 0
+	if maxProg > 0 then
+		blueFraction = blueProg / maxProg
+	end
+
+	local pinkFraction = 0
+	if maxProg > 0 then
+		pinkFraction = pinkProg / maxProg
+	end
+
+	-- Tween bars
+	if activeBlueBarTween then safeCancelTween(activeBlueBarTween) end
+	activeBlueBarTween = tweenProgressBar(BlueProgress, blueFraction, BAR_TWEEN_DURATION)
+
+	if activePinkBarTween then safeCancelTween(activePinkBarTween) end
+	activePinkBarTween = tweenProgressBar(PinkProgress, pinkFraction, BAR_TWEEN_DURATION)
+
+	-- Numeric tween for percent labels (no penalty in TF mode)
+	local oldBluePerc = displayedBluePercentValue
+	local newBluePerc = (blueFraction * 100)
+	tweenNumber(oldBluePerc, newBluePerc, NUMBER_TWEEN_DURATION, function(val)
+		displayedBluePercentValue = val
+		BluePercentLabel.Text = formatPercentText(val, 0)
+	end)
+
+	local oldPinkPerc = displayedPinkPercentValue
+	local newPinkPerc = (pinkFraction * 100)
+	tweenNumber(oldPinkPerc, newPinkPerc, NUMBER_TWEEN_DURATION, function(val)
+		displayedPinkPercentValue = val
+		PinkPercentLabel.Text = formatPercentText(val, 0)
+	end)
+
+	-- Store displayed fractions for internal state
+	displayedBlueFraction = blueFraction
+	displayedPinkFraction = pinkFraction
+end
+
+-- NEW: Listener for Zone Control countdown
+-- Accepts optional penalty args: updateZoneCountdown:FireAllClients(zc_blueProgress, zc_pinkProgress, ZC_TARGET_POINTS, ceil(bluePenalty), ceil(pinkPenalty))
+local function onUpdateZoneCountdown(blueProg, pinkProg, maxProg, bluePenalty, pinkPenalty)
+	-- default penalty values if server didn't send them
+	bluePenalty = bluePenalty or 0
+	pinkPenalty = pinkPenalty or 0
+
+	-- Server sends (Blue_Progress, Pink_Progress, Max)
+	local blueFraction = 0
+	if maxProg > 0 then
+		blueFraction = blueProg / maxProg
+	end
+
+	local pinkFraction = 0
+	if maxProg > 0 then
+		pinkFraction = pinkProg / maxProg
+	end
+
+	-- Tween bars
+	if activeBlueBarTween then safeCancelTween(activeBlueBarTween) end
+	activeBlueBarTween = tweenProgressBar(BlueProgress, blueFraction, BAR_TWEEN_DURATION)
+
+	if activePinkBarTween then safeCancelTween(activePinkBarTween) end
+	activePinkBarTween = tweenProgressBar(PinkProgress, pinkFraction, BAR_TWEEN_DURATION)
+
+	-- Numeric tween for percent labels, include penalty inside text when >0
+	local oldBluePerc = displayedBluePercentValue
+	local newBluePerc = (blueFraction * 100)
+	tweenNumber(oldBluePerc, newBluePerc, NUMBER_TWEEN_DURATION, function(val)
+		displayedBluePercentValue = val
+		BluePercentLabel.Text = formatPercentText(val, bluePenalty)
+	end)
+
+	local oldPinkPerc = displayedPinkPercentValue
+	local newPinkPerc = (pinkFraction * 100)
+	tweenNumber(oldPinkPerc, newPinkPerc, NUMBER_TWEEN_DURATION, function(val)
+		displayedPinkPercentValue = val
+		PinkPercentLabel.Text = formatPercentText(val, pinkPenalty)
+	end)
+
+	-- Store displayed fractions for internal state
+	displayedBlueFraction = blueFraction
+	displayedPinkFraction = pinkFraction
+end
+
+-- NEW: Listener for Zone Control pole UI
+local function onUpdateZoneUI(pole1, pole1Owner, pole2, pole2Owner)
+	-- Color the Pole Icons
+	if pole1Owner == blueTeam then
+		PoleIcon1.BackgroundColor3 = blueTeam.TeamColor.Color
+	elseif pole1Owner == pinkTeam then
+		PoleIcon1.BackgroundColor3 = pinkTeam.TeamColor.Color
+	else
+		PoleIcon1.BackgroundColor3 = Color3.new(45/255, 45/255, 45/255) -- dark gray
+	end
+
+	if pole2Owner == blueTeam then
+		PoleIcon2.BackgroundColor3 = blueTeam.TeamColor.Color
+	elseif pole2Owner == pinkTeam then
+		PoleIcon2.BackgroundColor3 = pinkTeam.TeamColor.Color
+	else
+		PoleIcon2.BackgroundColor3 = Color3.new(45/255, 45/255, 45/255) -- dark gray
+	end
+
+	-- Color the Glow Parts in the map
+	if pole1 and pole1:FindFirstChild("GlowPart") then
+		pole1.GlowPart.BrickColor = pole1Owner and pole1Owner.TeamColor or BrickColor.new("White")
+	end
+	if pole2 and pole2:FindFirstChild("GlowPart") then
+		pole2.GlowPart.BrickColor = pole2Owner and pole2Owner.TeamColor or BrickColor.new("White")
+	end
+
+	-- *** THIS IS THE FIX ***
+	-- Check who is scoring and apply/stop wobble
+
+	-- Check Blue Team wobble
+	if pole1Owner == blueTeam and pole2Owner == blueTeam then
+		-- Blue is scoring, start wobble
+		if not blueHackThread then
+			blueHackThread = task.spawn(function()
+				while true do
+					BluePercentLabel.Rotation = 10
+					task.wait(HACK_WOBBLE_TIME)
+					BluePercentLabel.Rotation = -10
+					task.wait(HACK_WOBBLE_TIME)
+				end
+			end)
+		end
+	else
+		-- Blue is NOT scoring, stop wobble
+		if blueHackThread then
+			task.cancel(blueHackThread)
+			blueHackThread = nil
+			TweenService:Create(BluePercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = -2}):Play()
+		end
+	end
+
+	-- Check Pink Team wobble
+	if pole1Owner == pinkTeam and pole2Owner == pinkTeam then
+		-- Pink is scoring, start wobble
+		if not pinkHackThread then
+			pinkHackThread = task.spawn(function()
+				while true do
+					PinkPercentLabel.Rotation = 10
+					task.wait(HACK_WOBBLE_TIME)
+					PinkPercentLabel.Rotation = -10
+					task.wait(HACK_WOBBLE_TIME)
+				end
+			end)
+		end
+	else
+		-- Pink is NOT scoring, stop wobble
+		if pinkHackThread then
+			task.cancel(pinkHackThread)
+			pinkHackThread = nil
+			TweenService:Create(PinkPercentLabel, HACK_TWEEN_INFO_RESET, {Rotation = 2}):Play()
+		end
+	end
+
+	-- --- NEW: Change percent label frame background when a team controls BOTH poles ---
+	-- If blue has both, tint blue percent frame to blue color and reset pink's; if pink has both do vice versa; otherwise reset both to default color
+	local blueHasBoth = (pole1Owner == blueTeam and pole2Owner == blueTeam)
+	local pinkHasBoth = (pole1Owner == pinkTeam and pole2Owner == pinkTeam)
+
+	if blueHasBoth then
+		setPercentFrameColor(BluePercentFrame, blueTeam.TeamColor.Color)
+		setPercentFrameColor(PinkPercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+	elseif pinkHasBoth then
+		setPercentFrameColor(PinkPercentFrame, pinkTeam.TeamColor.Color)
+		setPercentFrameColor(BluePercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+	else
+		-- neither controls both: reset both
+		setPercentFrameColor(BluePercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+		setPercentFrameColor(PinkPercentFrame, DEFAULT_PERCENT_FRAME_COLOR)
+	end
+end
+
+-- NEW: Main listener for gamemode
+local function onUpdateGameMode(gamemode)
+	currentGamemode = gamemode
+
+	if gamemode == "TerminalFrenzy" then
+		-- Show/Hide UI elements
+		BlueAvatarContainer.Visible = true
+		PinkAvatarContainer.Visible = true
+		PoleIcon1.Visible = false
+		PoleIcon2.Visible = false
+
+		-- Set default text
+		defaultStatusText = "Hack the enemy terminal!"
+
+		-- Re-connect the right event
+		tfProgressConnection = updateProgressEvent.OnClientEvent:Connect(onUpdateProgress)
+		-- Disconnect the other
+		if zcCountdownConnection then zcCountdownConnection:Disconnect() zcCountdownConnection = nil end
+
+	elseif gamemode == "ZoneControl" then
+		-- Show/Hide UI elements
+		BlueAvatarContainer.Visible = false
+		PinkAvatarContainer.Visible = false
+		PoleIcon1.Visible = true
+		PoleIcon2.Visible = true
+
+		-- Set default text
+		defaultStatusText = "Capture the Towers!"
+
+		-- Re-connect the right event
+		zcCountdownConnection = updateZoneCountdown.OnClientEvent:Connect(onUpdateZoneCountdown)
+		-- Disconnect the other
+		if tfProgressConnection then tfProgressConnection:Disconnect() tfProgressConnection = nil end
+
+	elseif gamemode == "Intermission" then
+		-- Hide everything
+		BlueAvatarContainer.Visible = false
+		PinkAvatarContainer.Visible = false
+		PoleIcon1.Visible = false
+		PoleIcon2.Visible = false
+		defaultStatusText = "Waiting for players..."
+
+		-- Disconnect both
+		if zcCountdownConnection then zcCountdownConnection:Disconnect() zcCountdownConnection = nil end
+		if tfProgressConnection then tfProgressConnection:Disconnect() tfProgressConnection = nil end
+	end
+
+	-- Set status label to default
+	StatusLabel.Text = defaultStatusText
+end
+
+
+-- Called ONCE when this client first joins
+local function onPlayerSync(state, timer, status, blueProg, pinkProg, maxProg, rosters, points, gamemode)
+	print("Receiving sync packet from server...")
+
+	-- Store state locally
+	currentGameState = state
+
+	-- Set initial state
+	onUpdateGameMode(gamemode or "Intermission") -- This sets the defaultStatusText
+	StatusLabel.Text = defaultStatusText
+	StatusLabel.TextColor3 = Color3.new(1, 1, 1)
+	activeAlert = false
+	currentAlertId = 0
+
+	-- Sync all values
+	onUpdateTimer(timer)
+	onUpdatePoints(points)
+
+	-- Sync progress based on gamemode
+	if currentGamemode == "TerminalFrenzy" then
+		onUpdateProgress(blueProg, pinkProg, maxProg)
+	elseif currentGamemode == "ZoneControl" then
+		-- server may not include penalty args in initial sync; pass defaults
+		onUpdateZoneCountdown(blueProg, pinkProg, maxProg, 0, 0)
+	end
+
+
+	-- Update roster (wrapped in pcall to prevent sync from crashing)
+	local success, err = pcall(onUpdateTeamRoster, rosters)
+	if not success then
+		warn("Error during initial player sync: " .. tostring(err))
+	end
+end
+
+-- ===================================================================
+-- INITIALIZATION
+-- ===================================================================
+
+-- Connect all event listeners
+-- NOTE: updateProgressEvent and updateZoneCountdown are connected in onUpdateGameMode
+updateTimerEvent.OnClientEvent:Connect(onUpdateTimer)
+updateGameStateEvent.OnClientEvent:Connect(onUpdateGameState)
+updateTeamRosterEvent.OnClientEvent:Connect(onUpdateTeamRoster)
+playerSyncEvent.OnClientEvent:Connect(onPlayerSync)
+updatePointsEvent.OnClientEvent:Connect(onUpdatePoints)
+updateHackAlertEvent.OnClientEvent:Connect(onHackAlert)
+triggerMapAlertEvent.OnClientEvent:Connect(onMapAlert)
+revealTerminalEvent.OnClientEvent:Connect(onRevealTerminal)
+proximityHighlightGained.OnClientEvent:Connect(onProximityGained)
+proximityHighlightLost.OnClientEvent:Connect(onProximityLost)
+updateGameMode.OnClientEvent:Connect(onUpdateGameMode)
+updateZoneControlUI.OnClientEvent:Connect(onUpdateZoneUI)
+zoneAlertEvent.OnClientEvent:Connect(onZoneAlert) -- NEW
+
+-- Set default rotations
+BluePercentLabel.Rotation = -2
+PinkPercentLabel.Rotation = 2
+
+-- Ensure percent frame default colors
+BluePercentFrame.BackgroundColor3 = DEFAULT_PERCENT_FRAME_COLOR
+PinkPercentFrame.BackgroundColor3 = DEFAULT_PERCENT_FRAME_COLOR
+
+print("ProgressGuiClient (v13.3 - Zone Countdown Tween + Penalty + Label BG color) loaded.")
