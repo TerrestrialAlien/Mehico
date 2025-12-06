@@ -67,8 +67,7 @@ function GameLoopService:SetGameState(state, winner)
         GamemodeService:Cleanup()
         if currentMap then currentMap:Destroy() currentMap = nil end
 
-        workspace.Gravity = workspace.Gravity -- Reset gravity? Original code uses BASE_GRAVITY
-        -- Using GameConfig for gravity might be better but I'll stick to logic logic.
+        workspace.Gravity = 196.2 -- Reset to Base Gravity
 
         intermissionTimer = GameConfig.Game.IntermissionTime
         currentStatus = "Intermission - Waiting for players..."

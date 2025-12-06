@@ -91,7 +91,7 @@ function GamemodeService:StartRound(map)
     updateTeamRosterEvent:FireAllClients(rosters)
 
     if currentModeModule then
-        currentModeModule:Start(map)
+        currentModeModule:Start(map, self)
     end
 end
 

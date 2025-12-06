@@ -5,6 +5,8 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
+local CollectionService = game:GetService("CollectionService")
+local Teams = game:GetService("Teams")
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 
 -- Events
@@ -26,6 +28,11 @@ local playerCooldowns = {}
 local playerHoverStates = {}
 local playerActionStates = {}
 local bombCooldowns = {}
+local playerHoverBoards = {}
+
+-- Teams
+local blueTeam = Teams["Bright blue"]
+local pinkTeam = Teams["Carnation pink"]
 
 function PhysicsService:Init(services)
     -- Movement Events
@@ -34,6 +41,16 @@ function PhysicsService:Init(services)
 
     requestAbilityEvent.OnServerEvent:Connect(function(player, abilityName)
         self:OnAbilityRequested(player, abilityName, abilityUsedEvent)
+    end)
+
+    local requestWallJumpEvent = eventFolder:WaitForChild("RequestWallJump")
+    local requestWallBoostEvent = eventFolder:WaitForChild("RequestWallBoost")
+
+    requestWallJumpEvent.OnServerEvent:Connect(function(player, pos)
+        self:OnWallJumpRequest(player, pos)
+    end)
+    requestWallBoostEvent.OnServerEvent:Connect(function(player, pos)
+        self:OnWallBoostRequest(player, pos)
     end)
 
     -- Bomb Events
@@ -52,6 +69,12 @@ function PhysicsService:Init(services)
             self:CheckSpeedLimits()
         end
     end)
+
+    local reportStunEvent = eventFolder:WaitForChild("ReportStun")
+    reportStunEvent.OnServerEvent:Connect(function(player, duration)
+        if type(duration) ~= "number" or duration > 10 then return end
+        playerStunnedEvent:FireAllClients(player, duration)
+    end)
 end
 
 function PhysicsService:Start()
@@ -62,7 +85,48 @@ function PhysicsService:OnPlayerRemoving(player)
     playerHoverStates[player.UserId] = nil
     playerActionStates[player] = nil
     bombCooldowns[player.UserId] = nil
-    -- Destroy hoverboard visual if tracked (not implemented fully)
+    self:DestroyHoverboard(player)
+end
+
+function PhysicsService:CreateHoverboard(player)
+    self:DestroyHoverboard(player)
+
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local board = Instance.new("Part")
+    board.Name = "HoverboardVisual"
+    board.Size = Vector3.new(4, 0.4, 2)
+    board.Material = Enum.Material.Neon
+
+    if player.Team then
+        board.BrickColor = player.Team.TeamColor
+    else
+        board.BrickColor = BrickColor.new("Bright blue")
+    end
+
+    board.Anchored = false
+    board.CanCollide = false
+    board.Massless = true
+
+    local weld = Instance.new("Weld")
+    weld.Part0 = root
+    weld.Part1 = board
+    weld.C0 = CFrame.new(0, -2.8, 0)
+    weld.Parent = board
+
+    board.Parent = char
+    board:SetNetworkOwner(player)
+    playerHoverBoards[player] = board
+end
+
+function PhysicsService:DestroyHoverboard(player)
+    if playerHoverBoards[player] then
+        pcall(function() playerHoverBoards[player]:Destroy() end)
+        playerHoverBoards[player] = nil
+    end
 end
 
 function PhysicsService:OnAbilityRequested(player, abilityName, abilityUsedEvent)
@@ -84,14 +148,14 @@ function PhysicsService:OnAbilityRequested(player, abilityName, abilityUsedEvent
         if isHovering then
             playerHoverStates[userId] = false
             playerCooldowns[userId][abilityName] = now
-            -- Destroy hoverboard visual (Not implemented here, assumed Client handles visual or separate VisualService)
-            -- MovementServer had server-side hoverboard visual creation.
+            self:DestroyHoverboard(player)
             abilityUsedEvent:FireAllClients(player, abilityName)
         else
             local lastUse = playerCooldowns[userId][abilityName] or 0
             if now - lastUse < config.Cooldown - 0.1 then return end
 
             playerHoverStates[userId] = true
+            self:CreateHoverboard(player)
             abilityUsedEvent:FireAllClients(player, abilityName)
         end
         return
@@ -131,6 +195,84 @@ function PhysicsService:CheckSpeedLimits()
                 root.AssemblyLinearVelocity = clamped
             end
         end
+    end
+end
+
+-- WallJump Validation
+function PhysicsService:OnWallJumpRequest(player, wallPosition)
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local dist = (root.Position - wallPosition).Magnitude
+    if dist > 12 then return end
+
+    local overlapParams = OverlapParams.new()
+    overlapParams.FilterDescendantsInstances = {char}
+    overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local parts = workspace:GetPartBoundsInRadius(wallPosition, 6, overlapParams)
+    local foundWall = false
+
+    for _, part in ipairs(parts) do
+        if CollectionService:HasTag(part, "WallJump") then
+            foundWall = true
+            break
+        end
+    end
+
+    if not foundWall then
+        warn("Possible cheat: " .. player.Name .. " tried to wall jump off invalid part.")
+    end
+end
+
+function PhysicsService:OnWallBoostRequest(player, wallPosition)
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local dist = (root.Position - wallPosition).Magnitude
+    if dist > 12 then
+        warn("Possible cheat: " .. player.Name .. " tried to boost from too far away.")
+        return
+    end
+
+    local overlapParams = OverlapParams.new()
+    overlapParams.FilterDescendantsInstances = {char}
+    overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local parts = workspace:GetPartBoundsInRadius(wallPosition, 6, overlapParams)
+    local isValid = false
+
+    for _, part in ipairs(parts) do
+        if CollectionService:HasTag(part, "WallBoost") then
+            isValid = true
+            break
+        end
+
+        if CollectionService:HasTag(part, "JumpPad_Blue") then
+            if player.Team == blueTeam then
+                isValid = true
+                break
+            else
+                warn("Cheat Attempt: " .. player.Name .. " tried to use Blue Pad but is not on Blue Team!")
+            end
+        end
+
+        if CollectionService:HasTag(part, "JumpPad_Pink") then
+            if player.Team == pinkTeam then
+                isValid = true
+                break
+            else
+                warn("Cheat Attempt: " .. player.Name .. " tried to use Pink Pad but is not on Pink Team!")
+            end
+        end
+    end
+
+    if not isValid then
+        warn("Boost Validation Failed for " .. player.Name)
     end
 end
 

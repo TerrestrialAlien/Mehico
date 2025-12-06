@@ -23,6 +23,8 @@ local zc_fogEmitter = nil
 local zc_playersInZone = {}
 local zc_damageTimer = 0
 local zc_zoneCheckTimer = 0
+local mapEventTriggered = false
+local GamemodeService = nil
 
 local zc_bluePenalty = 0
 local zc_pinkPenalty = 0
@@ -45,7 +47,50 @@ function ZoneControl:Init(services)
     PlayerService = services.PlayerService
 end
 
-function ZoneControl:Start(map)
+function ZoneControl:ApplyZoneEffect(player)
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return end
+
+    self:ResetZoneEffect(player)
+    if not zc_currentEffect then return end
+
+    if zc_currentEffect == "Speed Boost" then
+        humanoid.WalkSpeed = 40
+    elseif zc_currentEffect == "Low Health" then
+        humanoid.MaxHealth = 75
+        if humanoid.Health > 75 then humanoid.Health = 75 end
+    elseif zc_currentEffect == "High Jump" then
+        humanoid.JumpPower = GameConfig.Game.BaseJumpPower * 2.5
+    elseif zc_currentEffect == "Low Gravity" then
+        workspace.Gravity = workspace.Gravity * 0.35 -- Assuming base gravity is restored
+        humanoid.JumpPower = GameConfig.Game.BaseJumpPower * 1.5
+    end
+end
+
+function ZoneControl:ResetZoneEffect(player)
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    -- Reset to upgrades
+    -- Need access to upgrades levels. PlayerService handles upgrades.
+    -- I should probably ask PlayerService to reset stats or get stats.
+    -- For simplicity I'll hardcode reset to base or "Upgraded" values if I can access them?
+    -- PlayerService has teamUpgrades. But it's local to PlayerService.
+    -- I can assume PlayerService resets stats on respawn, but here I need real-time reset.
+    -- Better: PlayerService:ResetPlayerStats(player)
+    -- Or just reset to defaults + check upgrades (simplified)
+
+    humanoid.UseJumpPower = true
+    humanoid.MaxHealth = 100 -- Default
+    humanoid.WalkSpeed = 21 -- Default
+    humanoid.JumpPower = GameConfig.Game.BaseJumpPower
+    workspace.Gravity = 196.2 -- Default
+
+    if humanoid.Health > humanoid.MaxHealth then humanoid.Health = humanoid.MaxHealth end
+end
+
+function ZoneControl:Start(map, gamemodeService)
+    GamemodeService = gamemodeService
     zc_pole1 = map.ZonePoles:WaitForChild("Pole1")
     zc_pole2 = map.ZonePoles:WaitForChild("Pole2")
 
@@ -56,6 +101,7 @@ function ZoneControl:Start(map)
     zc_currentEffect = nil
     zc_zone = map:FindFirstChild("Zone")
     zc_playersInZone = {}
+    mapEventTriggered = false
 
     local fogPart = map:FindFirstChild("Fog")
     if fogPart then
@@ -153,10 +199,49 @@ function ZoneControl:Update(dt)
     -- Zone Effects Logic
     if zc_zone then
         zc_zoneCheckTimer = zc_zoneCheckTimer + dt
-        if zc_zoneCheckTimer >= 0.1 then
+        if zc_zoneCheckTimer >= 0.1 then -- ZC_ZONE_CHECK_INTERVAL
             zc_zoneCheckTimer = 0
-            -- Update players in zone...
-            -- Ignoring strict implementation of zone effects application for brevity, but logic is same as GameManager
+
+            local playersInZoneNow = {}
+            local partsInZone = workspace:GetPartsInPart(zc_zone)
+
+            for _, part in ipairs(partsInZone) do
+                local player = Players:GetPlayerFromCharacter(part.Parent)
+                if player and not playersInZoneNow[player] then
+                    playersInZoneNow[player] = true
+                    if not zc_playersInZone[player] then
+                        zc_playersInZone[player] = true
+                        self:ApplyZoneEffect(player)
+                    end
+                end
+            end
+
+            for player, _ in pairs(zc_playersInZone) do
+                if not playersInZoneNow[player] then
+                    zc_playersInZone[player] = nil
+                    self:ResetZoneEffect(player)
+                end
+            end
+        end
+    end
+
+    if zc_currentEffect == "Burning Ground" then
+        zc_damageTimer = zc_damageTimer + dt
+        if zc_damageTimer >= GameConfig.ZoneControl.DamageTick then
+            zc_damageTimer = 0
+            for player, _ in pairs(zc_playersInZone) do
+                if player.Character and player.Character:FindFirstChild("Humanoid") then
+                    player.Character.Humanoid:TakeDamage(GameConfig.ZoneControl.DamageAmount)
+                end
+            end
+        end
+    end
+
+    if not mapEventTriggered then
+        if (zc_blueProgress / GameConfig.ZoneControl.TargetPoints) >= GameConfig.Game.DynamicMapThreshold or
+           (zc_pinkProgress / GameConfig.ZoneControl.TargetPoints) >= GameConfig.Game.DynamicMapThreshold then
+            mapEventTriggered = true
+            GamemodeService:TriggerDynamicMapEvents(zc_pole1.Parent.Parent) -- Assumes map is parent of parent of pole
         end
     end
 

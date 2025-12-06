@@ -26,6 +26,7 @@ local wasPinkBaseAlertSent = false
 local mapEventTriggered = false
 local terminalRevealCooldowns = {}
 local currentMap = nil
+local GamemodeService = nil
 
 local PlayerService = nil
 
@@ -33,8 +34,9 @@ function TerminalFrenzy:Init(services)
     PlayerService = services.PlayerService
 end
 
-function TerminalFrenzy:Start(map)
+function TerminalFrenzy:Start(map, gamemodeService)
     currentMap = map
+    GamemodeService = gamemodeService
     tf_blueTeamProgress = 0
     tf_pinkTeamProgress = 0
     tf_playersHacking = {}
@@ -182,20 +184,7 @@ function TerminalFrenzy:Update(dt)
     end
 
     local total = GameConfig.TerminalFrenzy.TotalHackPoints
-    local bluePct = math.floor((tf_pinkTeamProgress / total) * 100) -- Pink progress on blue base? Wait, progress variables mean how much that team HAS hacked?
-    -- GameManager:
-    -- if teamToHack == blueTeam then tf_blueTeamProgress ... end
-    -- So tf_blueTeamProgress is "Damage done to blue base" (by pink team probably) OR "Progress Blue Team has made"?
-    -- GameManager: "tf_blueTeamProgress = math.min(tf_blueTeamProgress + deltaTime...)" when attacking blue base.
-    -- So `tf_blueTeamProgress` is "Progress AGAINST Blue Team".
-
-    -- And updateProgressEvent:FireAllClients(tf_pinkTeamProgress, tf_blueTeamProgress, ...)
-    -- Args: blueProgress, pinkProgress.
-    -- Wait, GameManager: updateProgressEvent:FireAllClients(tf_pinkTeamProgress, tf_blueTeamProgress, TF_TOTAL_HACK_POINTS)
-    -- This implies Arg1 is BlueTeam's score (which is damage to Pink?), Arg2 is PinkTeam's score.
-    -- If `tf_blueTeamProgress` is damage to blue base, then Pink Team Score = tf_blueTeamProgress.
-    -- GameManager: updateProgressEvent:FireAllClients(tf_pinkTeamProgress, tf_blueTeamProgress...)
-    -- So Arg1 = tf_pinkTeamProgress (Damage to Pink Base = Blue Score).
+    local bluePct = math.floor((tf_pinkTeamProgress / total) * 100)
 
     if bluePct ~= tf_lastBluePercent or math.floor((tf_blueTeamProgress/total)*100) ~= tf_lastPinkPercent then
          updateProgressEvent:FireAllClients(tf_pinkTeamProgress, tf_blueTeamProgress, total)
@@ -219,8 +208,7 @@ function TerminalFrenzy:Update(dt)
         if (tf_pinkTeamProgress / total) >= GameConfig.Game.DynamicMapThreshold or
            (tf_blueTeamProgress / total) >= GameConfig.Game.DynamicMapThreshold then
             mapEventTriggered = true
-            -- GamemodeService:TriggerDynamicMapEvents(currentMap) -- Call parent?
-            -- I'll just skip dynamic map trigger here for simplicity or assume it is handled.
+            GamemodeService:TriggerDynamicMapEvents(currentMap)
         end
     end
 
