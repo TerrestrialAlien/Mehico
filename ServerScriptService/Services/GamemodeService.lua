@@ -17,8 +17,9 @@ local updateTeamRosterEvent = eventFolder:WaitForChild("UpdateTeamRoster")
 local triggerMapAlertEvent = eventFolder:WaitForChild("TriggerMapAlert")
 
 -- Sub-Modules (can be inline for now to save files, or split later)
-local TerminalFrenzy = require(script.Parent:WaitForChild("TerminalFrenzyLogic"))
-local ZoneControl = require(script.Parent:WaitForChild("ZoneControlLogic"))
+-- Sub-Modules
+local TerminalFrenzy = require(script.Parent:WaitForChild("Gamemodes"):WaitForChild("TerminalFrenzyLogic"))
+local ZoneControl = require(script.Parent:WaitForChild("Gamemodes"):WaitForChild("ZoneControlLogic"))
 
 local currentModeModule = nil
 local currentGamemodeName = ""
@@ -38,7 +39,7 @@ function GamemodeService:Cleanup()
 end
 
 function GamemodeService:SelectAndLoadMap()
-    local mapFolder = ServerStorage:WaitForChild("GameMaps")
+    local mapFolder = ServerStorage:WaitForChild("Assets"):WaitForChild("GameMaps")
     local tfMaps = mapFolder:WaitForChild("TerminalFrenzy"):GetChildren()
     local zcMaps = mapFolder:WaitForChild("ZoneControl"):GetChildren()
 

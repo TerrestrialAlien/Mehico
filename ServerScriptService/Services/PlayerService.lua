@@ -85,13 +85,11 @@ function PlayerService:OnCharacterAdded(player, char)
     -- Give Loadout
     local starterGear = player:WaitForChild("StarterGear")
     starterGear:ClearAllChildren()
-    local toolFolder = game:GetService("ServerStorage"):WaitForChild("GameTools")
+    local toolFolder = game:GetService("ServerStorage"):WaitForChild("Assets"):WaitForChild("GameTools")
     for _, tool in ipairs(toolFolder:GetChildren()) do
         tool:Clone().Parent = starterGear
     end
-    player:LoadCharacter() -- Wait, infinite loop if called inside CharacterAdded?
-    -- GameManager: giveLoadout puts items in StarterGear. It doesn't call LoadCharacter inside CharacterAdded.
-    -- But GameManager called LoadCharacter AFTER giving loadout in "RoundInProgress" loop.
+
     -- Here I'll just clone to Backpack if character exists.
     for _, tool in ipairs(toolFolder:GetChildren()) do
         tool:Clone().Parent = player.Backpack

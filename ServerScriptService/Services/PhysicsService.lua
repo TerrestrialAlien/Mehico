@@ -16,7 +16,7 @@ local splatEvents = ReplicatedStorage:WaitForChild("SplatEvents")
 local requestThrowEvent = splatEvents:WaitForChild("RequestThrowBomb")
 
 -- Assets
-local bombTemplate = ReplicatedStorage:FindFirstChild("SplatBombModel")
+local bombTemplate = game:GetService("ServerStorage"):WaitForChild("Assets"):FindFirstChild("SplatBombModel")
 local soundFolder = ReplicatedStorage:WaitForChild("SplatSounds")
 local throwSound = soundFolder:FindFirstChild("ThrowSound")
 local impactSound = soundFolder:FindFirstChild("ImpactSound")

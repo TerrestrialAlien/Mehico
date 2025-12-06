@@ -12,8 +12,13 @@ Place these files in `game.ReplicatedStorage`.
     *   `AbilityController` (ModuleScript) - Client-side ability logic (SplatBomb input/aiming).
     *   `InterfaceController` (ModuleScript) - Client-side UI logic (HUD, Health, Upgrades, Zone Visuals).
     *   `AudioController` (ModuleScript) - Client-side audio management.
+*   **Note:** Assets required by the Client (e.g., Particles like `GrindSparks`, Sounds like `WallJumpSound`) should generally remain in `ReplicatedStorage` so they are accessible to LocalScripts.
+
+## **ServerStorage**
+Place these files in `game.ServerStorage`.
+
 *   **Folder:** `Assets`
-    *   (Place your Maps, Tools, Particles, and other assets here as needed)
+    *   (Place your Maps, Tools, and server-side assets here)
 
 ## **ServerScriptService**
 Place these files in `game.ServerScriptService`.
