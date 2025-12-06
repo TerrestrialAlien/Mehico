@@ -48,12 +48,9 @@ function GameLoopService:Start()
 
     Players.PlayerRemoving:Connect(function(player)
         if currentGameState == "RoundInProgress" then
-            local blueTeam = Teams["Bright blue"]
-            local pinkTeam = Teams["Carnation pink"]
-            if #blueTeam:GetPlayers() == 0 or #pinkTeam:GetPlayers() == 0 then
-                currentStatus = "Round ended - team was empty."
-                updateGameStateEvent:FireAllClients("RoundEnd", currentStatus)
-                task.delay(3, function() self:SetGameState("Intermission") end)
+            -- Removed the empty team check to prevent game ending in 1-player testing.
+            if #Players:GetPlayers() < 1 then
+                self:SetGameState("Intermission")
             end
         end
     end)
@@ -79,6 +76,12 @@ function GameLoopService:SetGameState(state, winner)
         updateTeamRosterEvent:FireAllClients(nil)
 
         PlayerService:ResetAllPlayers()
+
+        -- Respawn all players to clear gear and reset state
+        for _, player in ipairs(Players:GetPlayers()) do
+            player:LoadCharacter()
+        end
+
         intermissionStartedEvent:Fire()
 
     elseif state == "RoundInProgress" then
