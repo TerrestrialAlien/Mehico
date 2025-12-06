@@ -1,0 +1,234 @@
+--[[
+	MovementServer.lua (v3.0 - Server Visuals & Anti-Cheat)
+	- Handles server-side creation of Hoverboard visuals for replication.
+	- Implements speed validation (Anti-Cheat) for all movement states.
+	- Validates ability requests and tracks cooldowns.
+]]
+
+-- --- SERVICES ---
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+-- --- EVENTS ---
+local eventFolder = ReplicatedStorage:WaitForChild("GameEvents")
+
+-- Ensure stun networking events exist (create if missing)
+local function ensureRemoteEvent(name)
+	local existing = eventFolder:FindFirstChild(name)
+	if existing and existing:IsA("RemoteEvent") then return existing end
+	local re = Instance.new("RemoteEvent")
+	re.Name = name
+	re.Parent = eventFolder
+	return re
+end
+
+local requestAbilityEvent = eventFolder:WaitForChild("RequestMovementAbility")
+local abilityUsedEvent = eventFolder:WaitForChild("MovementAbilityUsed")
+local intermissionStartedEvent = eventFolder:WaitForChild("IntermissionStarted") 
+local replicateStunEvent = ensureRemoteEvent("ReplicateStun")
+local reportStunEvent = ensureRemoteEvent("ReportStun")
+local playerStunnedEvent = ensureRemoteEvent("PlayerStunned")
+
+-- --- CONFIGURATION ---
+local ABILITIES = {
+	Slide = { Cooldown = 7.5 }, 
+	Dive = { Cooldown = 9.5 },
+	Hoverboard = { Cooldown = 6.5 }
+}
+
+-- Anti-Cheat Limits (Studs/sec)
+local MAX_WALK_SPEED = 40   -- Base 25 + Jump/Fall/Lag buffer
+local MAX_SLIDE_SPEED = 70  -- Base 51.5 + buffer
+local MAX_DIVE_SPEED = 90   -- Base 70 + buffer
+local MAX_HOVER_SPEED = 100 -- Base 45 + buffer (Increased for upgrades)
+-- NOTE: MAX_HOVER_SPEED must be >= Client's HOVER_MOVE_SPEED or players will be rubberbanded
+
+-- --- RUNTIME DATA ---
+local playerCooldowns = {}
+local playerHoverStates = {} 
+local playerHoverBoards = {} -- [player] = Part
+local playerActionStates = {} -- [player] = { Action="Name", EndTime=tick }
+
+-- ===================================================================
+-- HELPERS
+-- ===================================================================
+
+local function destroyHoverboard(player)
+	if playerHoverBoards[player] then
+		pcall(function() playerHoverBoards[player]:Destroy() end)
+		playerHoverBoards[player] = nil
+	end
+end
+
+local function createHoverboard(player)
+	destroyHoverboard(player)
+
+	local char = player.Character
+	if not char then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local board = Instance.new("Part")
+	board.Name = "HoverboardVisual"
+	board.Size = Vector3.new(4, 0.4, 2)
+	board.Material = Enum.Material.Neon
+
+	if player.Team then
+		board.BrickColor = player.Team.TeamColor
+	else
+		board.BrickColor = BrickColor.new("Bright blue")
+	end
+
+	board.Anchored = false
+	board.CanCollide = false
+	board.Massless = true
+
+	-- Weld to root
+	local weld = Instance.new("Weld")
+	weld.Part0 = root
+	weld.Part1 = board
+	weld.C0 = CFrame.new(0, -2.8, 0)
+	weld.Parent = board
+
+	board.Parent = char
+	board:SetNetworkOwner(player)
+	playerHoverBoards[player] = board
+end
+
+-- ===================================================================
+-- HANDLERS
+-- ===================================================================
+
+local function onReportStun(player, duration)
+	if type(duration) ~= "number" or duration > 10 then return end
+	playerStunnedEvent:FireAllClients(player, duration)
+end
+
+local function onAbilityRequested(player, abilityName)
+	local config = ABILITIES[abilityName]
+	if not config then return end 
+
+	local now = os.clock()
+	local userId = player.UserId
+
+	if not playerCooldowns[userId] then playerCooldowns[userId] = {} end
+
+	-- *** HOVERBOARD LOGIC ***
+	if abilityName == "Hoverboard" then
+		local isHovering = playerHoverStates[userId] or false
+
+		if isHovering then
+			-- Toggle OFF
+			playerHoverStates[userId] = false
+			playerCooldowns[userId][abilityName] = now 
+			destroyHoverboard(player)
+			abilityUsedEvent:FireAllClients(player, abilityName)
+		else
+			-- Toggle ON
+			local lastUse = playerCooldowns[userId][abilityName] or 0
+			if now - lastUse < config.Cooldown - 0.1 then
+				-- warn("Cooldown violation: " .. player.Name .. " (Hoverboard)")
+				return
+			end
+
+			playerHoverStates[userId] = true
+			createHoverboard(player)
+			abilityUsedEvent:FireAllClients(player, abilityName)
+		end
+		return
+	end
+
+	-- *** SLIDE / DIVE LOGIC ***
+	local lastUse = playerCooldowns[userId][abilityName] or 0
+	if now - lastUse < config.Cooldown - 0.1 then
+		-- warn("Cooldown violation: " .. player.Name .. " (" .. abilityName .. ")")
+		return
+	end
+
+	playerCooldowns[userId][abilityName] = now
+
+	-- Track state for Anti-Cheat
+	local duration = (abilityName == "Slide") and 1.2 or 0.5
+	playerActionStates[player] = { Action = abilityName, EndTime = now + duration }
+
+	abilityUsedEvent:FireAllClients(player, abilityName)
+end
+
+local function onIntermissionStarted()
+	playerCooldowns = {}
+	playerHoverStates = {}
+	for player, _ in pairs(playerHoverBoards) do
+		destroyHoverboard(player)
+	end
+	playerActionStates = {}
+end
+
+local function onPlayerRemoving(player)
+	if playerCooldowns[player.UserId] then playerCooldowns[player.UserId] = nil end
+	if playerHoverStates[player.UserId] then playerHoverStates[player.UserId] = nil end
+	if playerActionStates[player] then playerActionStates[player] = nil end
+	destroyHoverboard(player)
+end
+
+local function onCharacterAdded(character)
+	local player = Players:GetPlayerFromCharacter(character)
+	if player then
+		playerHoverStates[player.UserId] = false
+		destroyHoverboard(player)
+	end
+end
+
+-- ===================================================================
+-- ANTI-CHEAT LOOP
+-- ===================================================================
+
+task.spawn(function()
+	while true do
+		local dt = RunService.Heartbeat:Wait()
+		local now = os.clock()
+
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+				local root = player.Character.HumanoidRootPart
+				local velocity = root.AssemblyLinearVelocity
+				local horizSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+
+				-- Determine Max Speed
+				local limit = MAX_WALK_SPEED
+				local state = playerActionStates[player]
+
+				if playerHoverStates[player.UserId] then
+					limit = MAX_HOVER_SPEED
+				elseif state and now < state.EndTime then
+					if state.Action == "Slide" then limit = MAX_SLIDE_SPEED
+					elseif state.Action == "Dive" then limit = MAX_DIVE_SPEED end
+				end
+
+				-- Check Violation
+				if horizSpeed > limit then
+					-- Simple correction: Clamp velocity
+					-- We apply a counter-force or just set it. Setting replicates somewhat poorly but works for punishment.
+					local clamped = velocity * (limit / horizSpeed)
+					root.AssemblyLinearVelocity = clamped
+					-- print("Speed Limit Reached: " .. player.Name .. " (" .. math.floor(horizSpeed) .. " > " .. limit .. ")")
+				end
+			end
+		end
+	end
+end)
+
+-- ===================================================================
+-- INITIALIZATION
+-- ===================================================================
+
+requestAbilityEvent.OnServerEvent:Connect(onAbilityRequested)
+replicateStunEvent.OnServerEvent:Connect(onReportStun) -- Legacy support
+reportStunEvent.OnServerEvent:Connect(onReportStun)
+intermissionStartedEvent.Event:Connect(onIntermissionStarted)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+Players.PlayerAdded:Connect(function(p)
+	p.CharacterAdded:Connect(onCharacterAdded)
+end)
+
+print("MovementServer (v3.0 - Visuals & Anti-Cheat) Loaded")
