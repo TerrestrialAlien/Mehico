@@ -1,7 +1,7 @@
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local GameConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("GameConfig"))
 local Players = game:GetService("Players")
 local Workspace = workspace
 local StarterGui = game:GetService("StarterGui")
@@ -34,9 +34,35 @@ local grindParticles = nil
 local grindAttachment = nil
 
 local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 local humanoid = nil
 local rootPart = nil
 local animator = nil
+
+-- GUI
+local MovementGui = playerGui:WaitForChild("MovementGui")
+local MovementContainer = MovementGui:WaitForChild("MovementContainer")
+local ABILITIES = {
+    Slide = {
+        Key = Enum.KeyCode.C,
+        Cooldown = GameConfig.Movement.SlideCooldown,
+        Frame = MovementContainer:WaitForChild("SlideFrame"),
+        LastUse = 0
+    },
+    Dive = {
+        Key = Enum.KeyCode.X,
+        Cooldown = GameConfig.Movement.DiveCooldown,
+        Frame = MovementContainer:WaitForChild("DiveFrame"),
+        LastUse = 0
+    },
+    Hoverboard = {
+        Key = Enum.KeyCode.LeftShift,
+        Cooldown = GameConfig.Movement.HoverCooldown,
+        Frame = MovementContainer:WaitForChild("HoverboardFrame"),
+        LastUse = 0
+    }
+}
+local IS_MOBILE = UserInputService.TouchEnabled
 
 -- Events
 local eventFolder = ReplicatedStorage:WaitForChild("GameEvents")
@@ -125,7 +151,6 @@ local blueTeam = Teams["Bright blue"]
 local pinkTeam = Teams["Carnation pink"]
 
 function MovementController:Init(controllers)
-    -- Nothing for now
 end
 
 function MovementController:Start()
@@ -158,9 +183,79 @@ function MovementController:Start()
 
     playerStunnedEvent.OnClientEvent:Connect(function(p, duration)
         if p and p ~= player then
-            -- Visuals handled elsewhere?
+            -- Visuals handled in InterfaceController
         end
     end)
+
+    -- Initialize UI
+    self:SetupUI()
+    RunService.RenderStepped:Connect(function() self:UpdateUI() end)
+end
+
+function MovementController:SetupUI()
+    for name, config in pairs(ABILITIES) do
+        config.Icon = config.Frame:WaitForChild("Icon")
+        config.CooldownBar = config.Icon:WaitForChild("CooldownBar")
+        config.TimerLabel = config.Icon:WaitForChild("TimerLabel")
+        config.KeybindLabel = config.Icon:WaitForChild("KeybindLabel")
+
+        if IS_MOBILE then config.KeybindLabel.Visible = false end
+
+        config.Icon.Activated:Connect(function()
+            self:RequestAbility(name)
+        end)
+    end
+end
+
+function MovementController:UpdateUI()
+    local now = os.clock()
+    for _, config in pairs(ABILITIES) do
+        if config.Icon and config.TimerLabel and config.TimerLabel.Visible then
+            local rem = (config.LastUse + config.Cooldown) - now
+            if rem > 0 then
+                config.TimerLabel.Text = string.format("%.1fs", rem)
+            else
+                config.Icon.Active = true
+                config.TimerLabel.Visible = false
+                config.CooldownBar.Visible = false
+            end
+        end
+    end
+end
+
+function MovementController:RequestAbility(abilityName)
+    local config = ABILITIES[abilityName]
+    if not config then return end
+
+    local now = os.clock()
+    if now - config.LastUse < config.Cooldown then return end
+
+    if abilityName == "Slide" then
+        if not self:CanSlide() then return end
+    elseif abilityName == "Dive" then
+        if not self:CanDive() then return end
+    elseif abilityName == "Hoverboard" then
+        -- Toggle logic handled by server response usually, but visual feedback is immediate
+    end
+
+    if abilityName ~= "Hoverboard" then
+        config.LastUse = now
+        self:StartCooldownUI(config)
+    end
+
+    requestAbilityEvent:FireServer(abilityName)
+end
+
+function MovementController:StartCooldownUI(config)
+    if config.Icon and config.TimerLabel and config.CooldownBar then
+        config.Icon.Active = false
+        config.TimerLabel.Visible = true
+        config.CooldownBar.Visible = true
+        config.CooldownBar.Size = UDim2.new(1, 0, 1, 0)
+
+        local tweenInfo = TweenInfo.new(config.Cooldown, Enum.EasingStyle.Linear)
+        TweenService:Create(config.CooldownBar, tweenInfo, { Size = UDim2.new(1, 0, 0, 0) }):Play()
+    end
 end
 
 function MovementController:OnCharAdded(char)
@@ -284,15 +379,15 @@ end
 function MovementController:HandleInput(input)
     if input.KeyCode == Enum.KeyCode.C then
         if not isWallStuck and not isGrinding then
-            if self:CanSlide() then requestAbilityEvent:FireServer("Slide") end
+            self:RequestAbility("Slide")
         end
     elseif input.KeyCode == Enum.KeyCode.X then
         if not isWallStuck and not isGrinding then
-            if self:CanDive() then requestAbilityEvent:FireServer("Dive") end
+            self:RequestAbility("Dive")
         end
     elseif input.KeyCode == Enum.KeyCode.LeftShift then
         if not isWallStuck and not isGrinding then
-            requestAbilityEvent:FireServer("Hoverboard")
+            self:RequestAbility("Hoverboard")
         end
     elseif input.KeyCode == Enum.KeyCode.E then
         if isWallStuck then self:PerformUnstick() end
@@ -563,6 +658,10 @@ function MovementController:SetupHoverboard()
     if hoverConnection then hoverConnection:Disconnect() end
     hoverConnection = RunService.Heartbeat:Connect(function(dt) self:UpdateHoverboard(dt) end)
 
+    local config = ABILITIES.Hoverboard
+    config.LastUse = os.clock()
+    self:StartCooldownUI(config)
+
     return true
 end
 
@@ -610,6 +709,10 @@ function MovementController:ToggleHoverboardOff()
 
     if hoverConnection then hoverConnection:Disconnect() hoverConnection = nil end
     self:SafeCleanup() -- Re-using cleanup for simplicity as it clears everything.
+
+    local config = ABILITIES.Hoverboard
+    config.LastUse = os.clock()
+    self:StartCooldownUI(config)
 end
 
 function MovementController:PerformHoverboardRaycast(origin, direction)
@@ -668,7 +771,7 @@ function MovementController:ApplyStun(duration, animTrack)
         pcall(function() stunTrack.Priority = Enum.AnimationPriority.Action; stunTrack:Play(0.15) end)
     end
 
-    -- pcall(function() reportStunEvent:FireServer(duration or 1.6) end)
+    reportStunEvent:FireServer(duration or 1.6)
 
     task.delay(duration or 1.6, function()
         if humanoid and humanoid.Parent then

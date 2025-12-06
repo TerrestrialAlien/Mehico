@@ -102,7 +102,20 @@ function TerminalFrenzy:OnHackEnded(player)
     if terminalPart then
         local teamToHack = (terminalPart.Parent.Name == "PinkTerminals") and pinkTeam or blueTeam
 
-        -- Tie break logic (simplified)
+        -- Tie break logic
+        local total = GameConfig.TerminalFrenzy.TotalHackPoints
+        local myScore = (teamToHack == pinkTeam) and tf_pinkTeamProgress or tf_blueTeamProgress
+        local enemyScore = (teamToHack == pinkTeam) and tf_blueTeamProgress or tf_pinkTeamProgress
+
+        local function getPercent(val, max) return math.floor((val/max)*100) end
+
+        if getPercent(myScore, total) == getPercent(enemyScore, total) then
+            if teamToHack == pinkTeam then
+                tf_pinkTeamProgress = math.max(0, tf_pinkTeamProgress - 1)
+            else
+                tf_blueTeamProgress = math.max(0, tf_blueTeamProgress - 1)
+            end
+        end
 
         tf_playersHacking[player] = nil
         tf_playerHackData[player] = nil

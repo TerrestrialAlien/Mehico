@@ -47,6 +47,25 @@ function ZoneControl:Init(services)
     PlayerService = services.PlayerService
 end
 
+function ZoneControl:CalculateZonePenalty(startStats, currentScore, currentPenalty)
+    local target = GameConfig.ZoneControl.TargetPoints
+    local startRem = (target - startStats.score) + (startStats.penalty or 0)
+    local endRem = (target - currentScore) + (currentPenalty or 0)
+
+    if startStats.score < (startStats.opponentScore or 0) and currentScore >= (startStats.opponentScore or 0) then
+        endRem = (target - startStats.opponentScore) + (currentPenalty or 0)
+    end
+
+    local delta = startRem - endRem
+    if delta <= 0 then return 0 end
+
+    local penalty = math.floor((0.75 * delta) + 0.5)
+    if math.abs(startRem - target) < 1e-6 then
+        penalty = penalty + 1
+    end
+    return penalty
+end
+
 function ZoneControl:ApplyZoneEffect(player)
     local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then return end
@@ -62,7 +81,7 @@ function ZoneControl:ApplyZoneEffect(player)
     elseif zc_currentEffect == "High Jump" then
         humanoid.JumpPower = GameConfig.Game.BaseJumpPower * 2.5
     elseif zc_currentEffect == "Low Gravity" then
-        workspace.Gravity = workspace.Gravity * 0.35 -- Assuming base gravity is restored
+        workspace.Gravity = workspace.Gravity * 0.35
         humanoid.JumpPower = GameConfig.Game.BaseJumpPower * 1.5
     end
 end
@@ -71,22 +90,19 @@ function ZoneControl:ResetZoneEffect(player)
     local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
 
-    -- Reset to upgrades
-    -- Need access to upgrades levels. PlayerService handles upgrades.
-    -- I should probably ask PlayerService to reset stats or get stats.
-    -- For simplicity I'll hardcode reset to base or "Upgraded" values if I can access them?
-    -- PlayerService has teamUpgrades. But it's local to PlayerService.
-    -- I can assume PlayerService resets stats on respawn, but here I need real-time reset.
-    -- Better: PlayerService:ResetPlayerStats(player)
-    -- Or just reset to defaults + check upgrades (simplified)
+    local team = player.Team
+    local upgrades = PlayerService and PlayerService:GetUpgrades(player) or { Health = 0, Speed = 0 }
+
+    local baseHealth = GameConfig.Upgrades.Health.Values[(upgrades.Health or 0) + 1]
+    local baseSpeed = GameConfig.Upgrades.Speed.Values[(upgrades.Speed or 0) + 1]
 
     humanoid.UseJumpPower = true
-    humanoid.MaxHealth = 100 -- Default
-    humanoid.WalkSpeed = 21 -- Default
+    humanoid.MaxHealth = baseHealth
+    humanoid.WalkSpeed = baseSpeed
     humanoid.JumpPower = GameConfig.Game.BaseJumpPower
-    workspace.Gravity = 196.2 -- Default
+    workspace.Gravity = 196.2
 
-    if humanoid.Health > humanoid.MaxHealth then humanoid.Health = humanoid.MaxHealth end
+    if humanoid.Health > baseHealth then humanoid.Health = baseHealth end
 end
 
 function ZoneControl:Start(map, gamemodeService)
@@ -146,15 +162,26 @@ function ZoneControl:OnPoleCaptured(player, poleNumber)
     local alertType = "OnePole"
     local justGotBoth = false
 
-    -- Penalty Logic (Simplified for brevity but should match GameManager)
-
     if newBlueHasBoth and not prevBlueHasBoth then
         justGotBoth = true
         alertType = "BothPoles"
+        if zc_lastZoneOwner == "Pink" then
+            local penalty = self:CalculateZonePenalty(zc_pinkStartStats, zc_pinkProgress, zc_pinkPenalty)
+            if penalty > 0 then zc_pinkPenalty = zc_pinkPenalty + penalty end
+        end
+        zc_lastZoneOwner = "Blue"
+        zc_blueStartStats = { score = zc_blueProgress, penalty = zc_bluePenalty, opponentScore = zc_pinkProgress }
     end
+
     if newPinkHasBoth and not prevPinkHasBoth then
         justGotBoth = true
         alertType = "BothPoles"
+        if zc_lastZoneOwner == "Blue" then
+            local penalty = self:CalculateZonePenalty(zc_blueStartStats, zc_blueProgress, zc_bluePenalty)
+            if penalty > 0 then zc_bluePenalty = zc_bluePenalty + penalty end
+        end
+        zc_lastZoneOwner = "Pink"
+        zc_pinkStartStats = { score = zc_pinkProgress, penalty = zc_pinkPenalty, opponentScore = zc_blueProgress }
     end
 
     updateZoneControlUI:FireAllClients(zc_pole1, zc_pole1Owner, zc_pole2, zc_pole2Owner)
@@ -190,13 +217,11 @@ function ZoneControl:Update(dt)
         end
     end
 
-    -- Send UI Update (Throttled ideally, but here every frame for smoothness?) GameManager did it on change.
     updateZoneCountdown:FireAllClients(zc_blueProgress, zc_pinkProgress, GameConfig.ZoneControl.TargetPoints, math.ceil(zc_bluePenalty), math.ceil(zc_pinkPenalty))
 
     if zc_blueProgress >= GameConfig.ZoneControl.TargetPoints then return blueTeam end
     if zc_pinkProgress >= GameConfig.ZoneControl.TargetPoints then return pinkTeam end
 
-    -- Zone Effects Logic
     if zc_zone then
         zc_zoneCheckTimer = zc_zoneCheckTimer + dt
         if zc_zoneCheckTimer >= 0.1 then -- ZC_ZONE_CHECK_INTERVAL
@@ -241,7 +266,7 @@ function ZoneControl:Update(dt)
         if (zc_blueProgress / GameConfig.ZoneControl.TargetPoints) >= GameConfig.Game.DynamicMapThreshold or
            (zc_pinkProgress / GameConfig.ZoneControl.TargetPoints) >= GameConfig.Game.DynamicMapThreshold then
             mapEventTriggered = true
-            GamemodeService:TriggerDynamicMapEvents(zc_pole1.Parent.Parent) -- Assumes map is parent of parent of pole
+            GamemodeService:TriggerDynamicMapEvents(zc_pole1.Parent.Parent)
         end
     end
 
