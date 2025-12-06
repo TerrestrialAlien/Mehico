@@ -1,0 +1,220 @@
+--[[
+	UpgradeGuiClient (v2.5 - FULL RESYNC)
+	- Handles all client-side logic for the Upgrade Shop GUI.
+	- Shows/hides the GUI.
+	- Closes the GUI when the player walks.
+	- Fetches upgrade levels from the server.
+	- Sends purchase requests to the server.
+	- Updates the UI to reflect current levels and costs.
+]]
+
+-- --- SERVICES ---
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Teams = game:GetService("Teams")
+
+-- --- PLAYER & GUI ---
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local UpgradeGui = playerGui:WaitForChild("UpgradeGui")
+local MainFrame = UpgradeGui:WaitForChild("MainFrame")
+local CloseButton = MainFrame:WaitForChild("CloseButton")
+
+-- NEW: Container for the list layout
+local UpgradesContainer = MainFrame:WaitForChild("UpgradesContainer")
+
+-- Upgrade Frames
+local HealthFrame = UpgradesContainer:WaitForChild("HealthFrame")
+local SpeedFrame = UpgradesContainer:WaitForChild("SpeedFrame")
+local RespawnFrame = UpgradesContainer:WaitForChild("RespawnFrame")
+
+-- Team definitions
+local blueTeam = Teams["Bright blue"]
+local pinkTeam = Teams["Carnation pink"]
+
+-- --- REMOTE EVENTS ---
+local eventFolder = ReplicatedStorage:WaitForChild("GameEvents")
+local showUpgradeGuiEvent = eventFolder:WaitForChild("ShowUpgradeGui")
+local requestUpgradeEvent = eventFolder:WaitForChild("RequestUpgrade")
+local getUpgradeLevelsEvent = eventFolder:WaitForChild("GetUpgradeLevels")
+local updateUpgradeLevelsEvent = eventFolder:WaitForChild("UpdateUpgradeLevels")
+local updatePointsEvent = eventFolder:WaitForChild("UpdatePoints")
+
+-- --- UPGRADE CONFIG (Must match server!) ---
+local UPGRADE_CONFIG = {
+	Respawn = {
+		Costs = {2, 4, 6}, -- Cost for Lvl 1, Lvl 2, Lvl 3
+		Values = {6, 5.4, 4.8, 4.2}, -- Respawn time at Lvl 0, Lvl 1, Lvl 2, Lvl 3
+		MaxLevel = 3,
+		Suffix = "s Respawn"
+	},
+	Health = {
+		Costs = {2, 3, 5},
+		Values = {100, 105, 115, 120},
+		MaxLevel = 3,
+		Suffix = " HP"
+	},
+	Speed = {
+		Costs = {1, 2, 3},
+		Values = {21, 22, 23, 24}, -- Start speed is 21
+		MaxLevel = 3,
+		Suffix = " Speed"
+	}
+}
+
+-- --- LOCAL CACHE ---
+local currentPoints = 0
+local currentLevels = { Health = 0, Speed = 0, Respawn = 0 }
+local humanoid = nil
+
+-- ===================================================================
+-- GUI FUNCTIONS
+-- ===================================================================
+
+-- Updates a single row (e.g., HealthFrame) with new info
+local function updateRow(frame, upgradeType, level)
+	local config = UPGRADE_CONFIG[upgradeType]
+	local levelLabel = frame:WaitForChild("LevelLabel")
+	local costLabel = frame:WaitForChild("CostLabel")
+	local button = frame:WaitForChild("UpgradeButton")
+
+	if level >= config.MaxLevel then
+		-- MAX LEVEL
+		levelLabel.Text = config.Values[level + 1] .. config.Suffix
+		costLabel.Text = "MAX LEVEL"
+		button.Text = "MAX"
+		button.Active = false -- Disable button
+	else
+		-- Can be upgraded
+		local currentVal = config.Values[level + 1]
+		local nextVal = config.Values[level + 2]
+		local cost = config.Costs[level + 1]
+
+		levelLabel.Text = currentVal .. " -> " .. nextVal .. config.Suffix
+		costLabel.Text = "Cost: " .. cost .. " Pt"
+		button.Text = "UPGRADE"
+		button.Active = (currentPoints >= cost) -- Disable if not enough points
+	end
+end
+
+-- Fetches all levels from server and updates all rows
+local function refreshAllUpgrades()
+	print("Requesting upgrade levels from server...")
+	local success, levels = pcall(getUpgradeLevelsEvent.InvokeServer, getUpgradeLevelsEvent)
+
+	if success and levels then
+		print("Got levels: ", levels)
+		currentLevels = levels
+		updateRow(HealthFrame, "Health", levels.Health)
+		updateRow(SpeedFrame, "Speed", levels.Speed)
+		updateRow(RespawnFrame, "Respawn", levels.Respawn)
+	else
+		warn("Failed to get upgrade levels from server.")
+	end
+end
+
+-- Shows or hides the GUI
+local function showGui(show)
+	if show then
+		-- Refresh all data before showing
+		refreshAllUpgrades()
+		MainFrame.Visible = true
+	else
+		MainFrame.Visible = false
+	end
+end
+
+-- ===================================================================
+-- EVENT HANDLERS
+-- ===================================================================
+
+-- Server tells us to show the GUI
+local function onShowGui()
+	showGui(true)
+end
+
+-- Player clicks an upgrade button
+local function onUpgradeClicked(upgradeType)
+	print("Attempting to buy " .. upgradeType)
+	local button = UpgradesContainer[upgradeType .. "Frame"]:WaitForChild("UpgradeButton")
+	button.Active = false -- Disable button to prevent spam
+	button.Text = "..."
+
+	requestUpgradeEvent:FireServer(upgradeType)
+
+	-- Refresh GUI after 0.5s to get new stats
+	task.wait(0.5)
+	refreshAllUpgrades()
+end
+
+-- Server confirms a single upgrade has changed
+local function onUpgradeLevelsChanged(team, upgradeType, newLevel)
+	if player.Team == team then
+		print("Received level sync for: " .. upgradeType)
+		currentLevels[upgradeType] = newLevel
+		-- Refresh all rows in case costs/availability changed
+		refreshAllUpgrades()
+	end
+end
+
+-- Server tells us our points changed
+local function onPointsChanged(newPoints)
+	currentPoints = newPoints
+	-- Refresh all rows if GUI is visible
+	if MainFrame.Visible then
+		refreshAllUpgrades()
+	end
+end
+
+-- Player's character is added
+local function onCharacterAdded(character)
+	humanoid = character:WaitForChild("Humanoid")
+
+	-- Listen for walking
+	humanoid.Running:Connect(function(speed)
+		if speed > 0.1 and MainFrame.Visible then
+			showGui(false)
+		end
+	end)
+end
+
+-- Player's character is removed (on death)
+local function onCharacterRemoving()
+	humanoid = nil
+end
+
+-- ===================================================================
+-- INITIALIZATION
+-- ===================================================================
+
+-- Connect local functions to GUI events
+CloseButton.MouseButton1Click:Connect(function()
+	showGui(false)
+end)
+
+HealthFrame:WaitForChild("UpgradeButton").MouseButton1Click:Connect(function()
+	onUpgradeClicked("Health")
+end)
+
+SpeedFrame:WaitForChild("UpgradeButton").MouseButton1Click:Connect(function()
+	onUpgradeClicked("Speed")
+end)
+
+RespawnFrame:WaitForChild("UpgradeButton").MouseButton1Click:Connect(function()
+	onUpgradeClicked("Respawn")
+end)
+
+-- Connect to RemoteEvents
+showUpgradeGuiEvent.OnClientEvent:Connect(onShowGui)
+updateUpgradeLevelsEvent.OnClientEvent:Connect(onUpgradeLevelsChanged)
+updatePointsEvent.OnClientEvent:Connect(onPointsChanged)
+
+-- Handle character loading
+player.CharacterAdded:Connect(onCharacterAdded)
+player.CharacterRemoving:Connect(onCharacterRemoving)
+if player.Character then
+	onCharacterAdded(player.Character)
+end
+
+print("UpgradeGuiClient (v2.5 - FULL RESYNC) loaded.")
+
