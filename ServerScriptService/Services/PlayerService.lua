@@ -135,6 +135,10 @@ function PlayerService:AddPoints(player, amount)
     end
 end
 
+function PlayerService:GetUpgrades(player)
+    return player.Team and teamUpgrades[player.Team] or { Health = 0, Speed = 0, Respawn = 0 }
+end
+
 function PlayerService:OnRequestUpgrade(player, upgradeType)
     local data = playerData[player.UserId]
     local team = player.Team
